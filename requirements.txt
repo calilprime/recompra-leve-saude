@@ -1,0 +1,17 @@
+# Recompra FIDC Leve Saúde — dependências
+#
+#   pip install -r requirements.txt
+#
+# Fora daqui, só biblioteca padrão: o servidor, a página, o SSE e os seletores
+# de arquivo são http.server, json e tkinter.
+
+# Leitura e escrita de .xlsx. Obrigatória — é o formato do template e do
+# relatório de exceções.
+openpyxl>=3.1
+
+# Fonte "Banco de dados" (Fase 3). Sem ela a interface roda normalmente pela
+# fonte "Arquivo"; a conexão com o PostgreSQL da Vórtx é que fica indisponível.
+psycopg2-binary>=2.9
+
+# Fase 5 — extração pela API de Cobranças da Grafeno, quando a conta sair.
+requests>=2.31

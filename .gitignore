@@ -1,0 +1,27 @@
+# Credenciais — regra 15.4. Primeira linha, de propósito.
+.env
+
+# Snapshots das extrações: contêm CPF e nome de pessoas físicas (seção 7.3).
+snapshots/
+
+# Saídas, logs e o histórico da operação.
+saidas/
+logs/
+historico_recompras.json
+
+# Amostras reais usadas nos testes — são arquivos de rodada com dados pessoais.
+testes/amostras/
+testes/historico_de_teste.json
+
+# O template é cópia do arquivo oficial de 50 MB: fica fora do versionamento.
+templates/*.xlsx
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Excel abre arquivos temporários com este prefixo
+~$*
+*.tmp
