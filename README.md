@@ -11,17 +11,50 @@ Este arquivo é o manual de operação e o registro do que já está pronto.
 
 ## Como rodar
 
-**Duplo clique em `Abrir Recompra.bat`.** O navegador abre sozinho.
+**Duplo clique em `Hub Ferramentas Netz\Abrir Ferramentas Netz.bat`**, na pasta
+acima. O navegador abre sozinho, com a Recompra e a Extração FNET em abas. É a
+forma normal de abrir — o `Abrir Recompra.bat` desta pasta existe só para rodar
+a Recompra isolada, em depuração.
 
-Na primeira vez, instale as dependências:
+### Na primeira vez, nesta máquina
+
+**1 · Instalar as dependências.** Abra o Prompt de Comando dentro desta pasta —
+o caminho mais rápido é digitar `cmd` na barra de endereço do Explorador, com a
+pasta aberta — e rode:
 
 ```
-pip install -r requirements.txt
+py -m pip install -r requirements.txt
 ```
+
+Se preferir digitar o caminho, é `cd /d "<sua pasta>\Recompra - Leve Saude\Código
+VS CODE"` antes do `pip`. No PowerShell, `cd` sem o `/d`.
+
+**2 · Criar o `.env`**, se for usar a fonte `Banco de dados`. Na mesma janela:
+
+```
+copy .env.exemplo .env
+notepad .env
+```
+
+O `.env.exemplo` é o modelo e fica onde está; o programa lê o `.env`. Só o
+`PGPASSWORD` precisa ser preenchido — o resto já vem certo. Os campos da
+Grafeno ficam vazios enquanto a API não sai. Além da senha, a máquina precisa
+ter o IP liberado no firewall do Azure; sem isso a conexão expira sem dizer por
+quê, e a fonte `Arquivo` é o caminho.
+
+**3 · Popular o histórico.** No fim da página, o quadro *Histórico de recompras ·
+a trava* → **Popular o histórico pelas rodadas anteriores**, com o interruptor de
+sobrescrever desligado. Sem isso não há sugestão de número de rodada, nem trava
+contra recompra repetida, nem checagem de janela já usada. Detalhe em
+`Guia_Historico_e_Reprocessamento_Retroativo.pdf`.
 
 E confira se `templates/Leve_Saude_Recompra_TEMPLATE.xlsx` existe. Ele é a cópia
 do arquivo oficial de recompra com as duas fórmulas corrigidas — a automação
 copia esse arquivo a cada rodada e preenche os dados.
+
+O passo a passo para quem está instalando pela primeira vez, com os comandos
+prontos e a solução dos erros comuns, está em `LEIA-ME (setup nesta máquina).txt`, na raiz
+da pasta compartilhada.
 
 ---
 
@@ -91,8 +124,9 @@ Código VS CODE/
 │   ├── fonte_vortx.py        # PostgreSQL (somente SELECT) + arquivo
 │   ├── fonte_grafeno.py      # arquivo; API na Fase 5
 │   ├── conciliacao.py        # deduplicação e as três passadas de casamento
-│   ├── calculo.py            # multa, juros, janela quinzenal, dias úteis
-│   ├── historico.py          # trava contra recompra repetida
+│   ├── calculo.py            # multa, juros, janela (do histórico), dias úteis
+│   ├── historico.py          # trava contra recompra repetida e janela repetida
+│   ├── semente_historico.py  # popula o histórico pelas rodadas do OneDrive
 │   ├── validacoes.py         # bateria; bloqueia ou avisa
 │   ├── excel_saida.py        # preenche o template, sem alterar a estrutura
 │   ├── excecoes.py           # relatório de exceções

@@ -25,12 +25,26 @@ E confira se existe o arquivo `templates/Leve_Saude_Recompra_TEMPLATE.xlsx`
 
 ## 2. Preencher a tela
 
+> **Antes da primeira rodada:** clique em **"Popular o histórico pelas rodadas
+> anteriores"**, no fim da página. Sem histórico a numeração da rodada sai
+> errada (a primeira simulação saiu como `Leve_Saude_1_...` sendo a 14ª), a
+> trava contra recomprar o mesmo título não existe e a checagem de janela já
+> usada não funciona. Ele só lê o OneDrive; não escreve nada lá.
+
 **Parâmetros da rodada**
-- **Nº da recompra**: já vem sugerido pelo histórico. Normalmente não precisa mexer.
+- **Nº da recompra**: vem sugerido **só quando a numeração do histórico forma
+  sequência**. Hoje não forma — os arquivos de agosto discordam entre si (a
+  pasta `13` traz arquivo numerado 13 e Termo assinado numerado 12) — então o
+  campo vem **vazio e é obrigatório**. Confira contra o Termo assinado da
+  rodada anterior antes de digitar.
 - **Data da recompra**: use a data de hoje, do dia da extração. Atrasar custa
   dinheiro (títulos pagos em duplicidade).
-- **Início/fim da janela**: preenche sozinho a partir da data (quinzena 1–15
-  ou 16–fim do mês) e já vem ajustado para emendar com a rodada anterior.
+- **Início/fim da janela**: o **início** é o dia seguinte ao fim da rodada
+  anterior, lido do histórico; o **fim** é a data da recompra menos 3 dias.
+  **Não existe regra de dia do mês** — a antiga ("1–15 ou 16 ao fim do mês")
+  foi o que zerou o Termo de 14/08, propondo uma janela já recomprada. Logo
+  abaixo dos campos aparece o resumo da última rodada registrada: confira que
+  a nova janela começa depois de onde aquela terminou.
 - **Juros e multa**: só leitura, vêm do template. Para mudar, edite a aba
   INFORMAÇÕES da planilha — nunca aqui.
 
@@ -39,9 +53,14 @@ E confira se existe o arquivo `templates/Leve_Saude_Recompra_TEMPLATE.xlsx`
   para conferir) ou `Arquivo` (aponte o `.xlsx`/`.csv` exportado, com o botão
   "Procurar…").
 - **Grafeno**: use `Arquivo` (a API ainda não está liberada). Selecione o
-  arquivo de cobranças. Se souber a data exata da extração, preencha "Data da
-  extração da Grafeno" — em branco, o sistema usa a data de modificação do
-  arquivo.
+  arquivo de cobranças. **Exporte a Grafeno no dia da recompra**: o sistema
+  deduz do próprio conteúdo até quando a base vai (`MAX(Data_Criação)` e
+  `MAX(Data_Pagamento)`) e mostra na validação "Frescor da base Grafeno". Se
+  você informar uma data de extração mais de um dia útil à frente do que o
+  conteúdo mostra, a rodada **para** — foi assim que uma base de 08/08 passou
+  por base de 14/08 e trouxe 1.225 boletos vencidos em vez de 2.326. O campo
+  "Data da extração da Grafeno" serve só de conferência; quem manda é o
+  conteúdo.
 
 **Saída**
 - **Pasta de destino**: onde os arquivos da rodada vão ser salvos (padrão:
@@ -101,7 +120,26 @@ não é tocado.
 
 ---
 
-## 5. Extra: reprocessamento retroativo
+## 5. Extra: popular o histórico
+
+Bloco **"Histórico de recompras · a trava"**, no fim da tela. Lê as rodadas já
+emitidas na pasta do OneDrive e monta o `historico_recompras.json`. Rode uma
+vez, antes da primeira rodada de verdade.
+
+O que ele consegue de cada rodada:
+
+| Rodadas | O que entra no histórico |
+|---|---|
+| 9 em diante | Janela, data, valor **e a lista de títulos** — a trava funciona título a título |
+| 4 a 8 | Janela, data e valor. **Sem lista de títulos**: naquele layout a coluna `N°` do Termo repete o mesmo número entre sacados diferentes (1.420 linhas para 883 números na 4ª), então travar por ela barraria o título errado |
+| 1 a 3 | Só a data, tirada do nome da pasta — os arquivos não têm aba de Termo |
+
+Ele **não** sobrescreve um histórico que já tenha rodadas, a menos que você
+marque a opção. O histórico é a trava contra cobrança em duplicidade.
+
+---
+
+## 6. Extra: reprocessamento retroativo
 
 No fim da mesma tela há o bloco **"Reprocessamento retroativo"**: roda o
 motor sobre rodadas já emitidas (pasta do OneDrive) para conferir passivo —
@@ -115,6 +153,15 @@ Só lê, não emite Termo e não mexe no histórico. Gera
 
 - **"Emissão bloqueada"**: veja o painel de Validações, corrija o que estiver
   em `ERRO` e clique em Conciliar de novo.
+- **"O Termo saiu com ZERO títulos"**: é `ERRO`, sempre. Confira, nesta ordem:
+  (1) a janela invade uma rodada já feita? (2) a base da Grafeno é do dia?
+  (3) a data da recompra está certa? Foi essa combinação que produziu o Termo
+  vazio de 14/08.
+- **"A tela informou extração em X, mas o conteúdo vai até Y"**: a base da
+  Grafeno é de outra semana. Exporte de novo e rode outra vez.
+- **"A janela invade rodada já registrada"**: aquele período já foi recomprado.
+  Os títulos já saíram da carteira da Vórtx, então o Termo sairia vazio.
+  Comece a janela onde a rodada anterior terminou.
 - **Perdeu a sessão ("esta conciliação não está mais na memória")**: o
   servidor reiniciou. Clique em Conciliar de novo antes de Gerar.
 - **Fonte "Banco de dados" falhando**: confira o `.env` (copie de

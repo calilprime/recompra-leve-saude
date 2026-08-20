@@ -17,7 +17,6 @@ A conta reproduz exatamente as colunas AW a AZ da aba VORTX::
 Precisão total nos passos intermediários; arredonda só na apresentação.
 """
 
-import calendar
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -140,48 +139,85 @@ def somar(valores):
 
 
 # ---------------------------------------------------------------------------
-#  Janela quinzenal (decisão 1.4 e seção 8.5)
+#  Janela — tirada do histórico, nunca do calendário
 # ---------------------------------------------------------------------------
-def sugerir_janela(data_recompra):
-    """
-    Janela quinzenal estrita, deduzida da data de recompra.
+#  A regra de calendário que estava aqui ("recompra na 1ª quinzena -> dia 16 ao
+#  último dia do mês anterior") **não corresponde à prática**, e foi ela que
+#  zerou o Termo da simulação de 14/08: produziu 16/07–31/07, uma janela que a
+#  rodada anterior já havia consumido.
+#
+#  O histórico real das rodadas não tem dia fixo de calendário:
+#
+#      10ª  16/06 a 30/06  ->  recompra 07/07
+#      11ª  01/07 a 15/07  ->  recompra 24/07
+#      13ª  01/07 a 31/07  ->  recompra 10/08
+#      14ª  01/08 a 14/08  ->  recompra 17/08
+#
+#  O padrão é: a janela **emenda** com o fim da anterior e termina poucos dias
+#  antes da recompra. Por isso o início vem do histórico e o fim, da data da
+#  recompra — e nunca de dia fixo do mês.
+def inicio_seguinte(fim_anterior):
+    """O dia seguinte ao fim da janela anterior. ``None`` sem histórico."""
+    fim_anterior = nz.data(fim_anterior)
+    return fim_anterior + timedelta(days=1) if fim_anterior else None
 
-    * recompra na 1ª quinzena  -> dia 16 ao último dia do **mês anterior**;
-    * recompra na 2ª quinzena  -> dia 1 ao 15 do **mês corrente**.
+
+def sugerir_janela(data_recompra, fim_anterior=None):
+    """
+    A janela sugerida para a tela.
+
+    * **início** = dia seguinte ao ``FIM`` da última rodada registrada. Sem
+      histórico devolve ``None``: quem opera preenche à mão, porque não há de
+      onde deduzir sem inventar;
+    * **fim** = ``data_recompra - DIAS_FOLGA_JANELA``, editável. É a folga que
+      as rodadas reais usaram (a 14ª fechou em 14/08 para recomprar em 17/08).
     """
     data_recompra = nz.data(data_recompra)
-    if data_recompra is None:
-        return None, None
-    if data_recompra.day <= 15:
-        ano, mes = (data_recompra.year, data_recompra.month - 1)
-        if mes == 0:
-            ano, mes = ano - 1, 12
-        return date(ano, mes, 16), date(ano, mes, calendar.monthrange(ano, mes)[1])
-    return (date(data_recompra.year, data_recompra.month, 1),
-            date(data_recompra.year, data_recompra.month, 15))
+    inicio = inicio_seguinte(fim_anterior)
+    fim = (data_recompra - timedelta(days=config.DIAS_FOLGA_JANELA)
+           if data_recompra else None)
+    #  Uma janela invertida não é sugestão: é ruído. Melhor devolver em branco.
+    if inicio and fim and inicio > fim:
+        fim = None
+    return inicio, fim
 
 
-def janela_valida(inicio, fim):
-    """True quando a janela segue o padrão dia 1–15 ou 16–fim do mês."""
+def problemas_da_janela(inicio, fim, data_recompra=None):
+    """
+    O que está errado na janela. Lista vazia = janela coerente.
+
+    Coerência, não calendário. O que impede uma rodada é janela em branco,
+    invertida ou que alcança dias posteriores à própria recompra — não o dia do
+    mês em que ela começa.
+    """
+    inicio, fim = nz.data(inicio), nz.data(fim)
+    data_recompra = nz.data(data_recompra)
+    problemas = []
+    if not inicio:
+        problemas.append("início da janela em branco")
+    if not fim:
+        problemas.append("fim da janela em branco")
+    if inicio and fim and inicio > fim:
+        problemas.append(f"início {nz.br(inicio)} é posterior ao fim {nz.br(fim)}")
+    if fim and data_recompra and fim > data_recompra:
+        problemas.append(
+            f"o fim {nz.br(fim)} é posterior à data de recompra "
+            f"{nz.br(data_recompra)} — o título ainda não venceu")
+    return problemas
+
+
+def janela_longa(inicio, fim):
+    """
+    Dias da janela quando ela passa do usual, senão ``0``.
+
+    As rodadas reais ficaram entre 14 e 31 dias. Uma janela muito maior costuma
+    ser erro de digitação no ano ou no mês, e merece aviso — não bloqueio.
+    """
     inicio, fim = nz.data(inicio), nz.data(fim)
     if not inicio or not fim or inicio > fim:
-        return False
-    if inicio.year != fim.year or inicio.month != fim.month:
-        return False
-    ultimo = calendar.monthrange(inicio.year, inicio.month)[1]
-    return (inicio.day, fim.day) in ((1, 15), (16, ultimo))
-
-
-def janela_seguinte(fim_anterior):
-    """A janela que vem logo depois da que terminou em ``fim_anterior``."""
-    fim_anterior = nz.data(fim_anterior)
-    if fim_anterior is None:
-        return None, None
-    inicio = fim_anterior + timedelta(days=1)
-    if inicio.day == 1:
-        return inicio, date(inicio.year, inicio.month, 15)
-    ultimo = calendar.monthrange(inicio.year, inicio.month)[1]
-    return inicio, date(inicio.year, inicio.month, ultimo)
+        return 0
+    dias = (fim - inicio).days + 1
+    return dias if dias > config.DIAS_JANELA_USUAL else 0
 
 
 # ---------------------------------------------------------------------------

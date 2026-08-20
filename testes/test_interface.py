@@ -117,9 +117,18 @@ def test_pagina_e_apoio(cliente):
               "juros e multa vêm da aba INFORMAÇÕES, não do código",
               str(inicial.get("juros_mora")))
 
-    janela = cliente.json("/janela?data=2026-08-05")
-    verificar(janela == {"inicio": "2026-07-16", "fim": "2026-07-31"},
-              "GET /janela aplica a regra quinzenal", str(janela))
+    #  Sem histórico o início fica em branco de propósito: não há de onde
+    #  deduzir. Antes daqui saía 16/07–31/07 por regra de calendário, e foi essa
+    #  janela — já consumida pela rodada anterior — que zerou o Termo de 14/08.
+    janela = cliente.json("/janela?data=2026-08-14")
+    verificar(janela["inicio"] == "" and janela["fim"] == "2026-08-11",
+              "GET /janela deixa o início em branco sem histórico e sugere o fim",
+              str(janela))
+    verificar(janela["ultima_rodada"] is None,
+              "e devolve que não há rodada anterior para conferir")
+    verificar(inicial.get("exige_numero") and inicial["numero_rodada"] == "",
+              "sem histórico a tela exige o número da rodada, não sugere 1",
+              str(inicial.get("numero_rodada")))
 
     grafeno = cliente.json("/testar-grafeno")
     verificar(not grafeno["ok"] and "Arquivo" in grafeno["mensagem"],
@@ -143,7 +152,10 @@ def parametros_da_12a(pasta_saida):
         "janela_inicio": "2026-07-01", "janela_fim": "2026-07-31",
         "fonte_vortx": "arquivo", "arquivo_vortx": str(AMOSTRA), "aba_vortx": "VORTX",
         "fonte_grafeno": "arquivo", "arquivo_grafeno": str(AMOSTRA),
-        "aba_grafeno": "GRAFENO", "data_extracao_grafeno": "2026-08-05",
+        #  Em branco de propósito: a data da extração da Grafeno agora sai do
+        #  conteúdo da base. Informar 05/08 sobre uma base mais antiga é
+        #  exatamente o que a validação de frescor passou a bloquear.
+        "aba_grafeno": "GRAFENO", "data_extracao_grafeno": "",
         "pasta_saida": str(pasta_saida),
         "copiar_onedrive": "0", "atualizar_historico": "1", "modo_simulacao": "1",
     }
@@ -187,6 +199,24 @@ def test_conciliar(cliente, parametros):
               resumo["defasagem_frase"])
     verificar(niveis.get("defasagem_zero") == "AVISO",
               "e a validação de defasagem acusa o mesmo")
+
+    #  As validações novas (itens 2, 3 e 4).
+    verificar(niveis.get("termo_nao_vazio") == "OK",
+              "a validação de Termo não vazio existe e passa nesta rodada",
+              str(niveis.get("termo_nao_vazio")))
+    verificar(niveis.get("grafeno_frescor") in ("OK", "AVISO"),
+              "o frescor da base sai do conteúdo, sem data informada",
+              str(niveis.get("grafeno_frescor")))
+    verificar(niveis.get("janela_coerente") == "OK",
+              "01–31/07 é janela coerente — a regra quinzenal a reprovava",
+              str(niveis.get("janela_coerente")))
+    verificar(niveis.get("janela_sem_sobreposicao") == "AVISO"
+              and "Histórico vazio" in next(
+                  v["detalhe"] for v in r["validacoes"]
+                  if v["chave"] == "janela_sem_sobreposicao"),
+              "sem histórico, a checagem de janela usada avisa que não pode conferir")
+    verificar("janela_quinzenal" not in niveis,
+              "a validação de quinzena estrita não existe mais")
 
     verificar(r["modo_simulacao"] and "_SIMULACAO" in r["arquivo_sugerido"],
               "o nome sugerido marca a simulação", r["arquivo_sugerido"])
@@ -308,6 +338,19 @@ def main():
 
     #  As saídas vão para uma pasta temporária: o teste não polui saidas/.
     pasta_saida = Path(tempfile.mkdtemp(prefix="recompra_teste_"))
+
+    #  O histórico real sai de cena durante o teste, por dois motivos. Primeiro,
+    #  para o teste não depender do que estiver semeado na máquina de quem roda:
+    #  com as rodadas 11 e 13 no histórico, os títulos da amostra da 12ª ficam
+    #  todos barrados e o Termo vai a zero, que agora é ERRO. Segundo, para que
+    #  ``test_historico_intacto`` volte a provar o que promete — que a simulação
+    #  não cria histórico nenhum.
+    guardado = None
+    if config.ARQUIVO_HISTORICO.exists():
+        guardado = config.ARQUIVO_HISTORICO.with_suffix(".json.teste-guardado")
+        shutil.move(str(config.ARQUIVO_HISTORICO), str(guardado))
+        print(f"histórico real guardado em {guardado.name}")
+
     try:
         test_pagina_e_apoio(cliente)
         test_formulario_incompleto(cliente)
@@ -326,6 +369,12 @@ def main():
     finally:
         servidor.shutdown()
         shutil.rmtree(pasta_saida, ignore_errors=True)
+        #  O histórico volta ao lugar mesmo se o teste explodir no meio: ele é a
+        #  trava contra recompra repetida, e perdê-lo é pior que a falha.
+        config.ARQUIVO_HISTORICO.unlink(missing_ok=True)
+        if guardado and guardado.exists():
+            shutil.move(str(guardado), str(config.ARQUIVO_HISTORICO))
+            print(f"histórico real restaurado ({config.ARQUIVO_HISTORICO.name})")
 
     print("\n" + "=" * 72)
     if _falhas:

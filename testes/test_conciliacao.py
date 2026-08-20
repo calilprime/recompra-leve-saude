@@ -151,20 +151,98 @@ def test_deduplicacao():
 
 
 def test_janela():
-    print("\nJanela quinzenal (decisão 1.4)")
-    verificar(calculo.sugerir_janela(date(2026, 8, 5))
-              == (date(2026, 7, 16), date(2026, 7, 31)),
-              "recompra na 1ª quinzena -> 16 ao fim do mês anterior")
-    verificar(calculo.sugerir_janela(date(2026, 7, 24))
-              == (date(2026, 7, 1), date(2026, 7, 15)),
-              "recompra na 2ª quinzena -> 1 a 15 do mês corrente")
-    verificar(calculo.janela_valida(date(2026, 7, 1), date(2026, 7, 15)),
-              "01–15 é janela válida")
-    verificar(not calculo.janela_valida(date(2026, 7, 1), date(2026, 7, 31)),
-              "01–31 não é quinzena (foi a janela usada na 12ª)")
-    verificar(calculo.janela_seguinte(date(2026, 7, 15))
-              == (date(2026, 7, 16), date(2026, 7, 31)),
-              "a janela seguinte emenda sem lacuna")
+    print("\nJanela — vem do histórico, não do calendário (item 2)")
+
+    #  A 14ª rodada real: janela 01/08 a 14/08, recompra em 17/08, emendando com
+    #  a rodada anterior, que terminou em 31/07.
+    verificar(calculo.sugerir_janela(date(2026, 8, 17), date(2026, 7, 31))
+              == (date(2026, 8, 1), date(2026, 8, 14)),
+              "reproduz a janela da 14ª: emenda em 01/08 e fecha 3 dias antes")
+    verificar(calculo.inicio_seguinte(date(2026, 7, 31)) == date(2026, 8, 1),
+              "o início é o dia seguinte ao fim da rodada anterior")
+    verificar(calculo.inicio_seguinte(None) is None,
+              "sem histórico não há início a sugerir — fica em branco")
+    verificar(calculo.sugerir_janela(date(2026, 8, 14), None)
+              == (None, date(2026, 8, 11)),
+              "sem histórico só o fim é sugerido")
+
+    #  A regra antiga de calendário produziria 16/07–31/07 para uma recompra em
+    #  14/08 — a janela já consumida que zerou o Termo.
+    verificar(calculo.sugerir_janela(date(2026, 8, 14), date(2026, 7, 31))[0]
+              == date(2026, 8, 1),
+              "para a recompra de 14/08 a janela começa em 01/08, não em 16/07")
+
+    #  Coerência, não dia do mês: as janelas que as rodadas reais usaram passam.
+    for inicio, fim, rotulo in ((date(2026, 7, 1), date(2026, 7, 15), "01–15/07, 11ª"),
+                                (date(2026, 7, 1), date(2026, 7, 31), "01–31/07, 13ª"),
+                                (date(2026, 8, 1), date(2026, 8, 14), "01–14/08, 14ª")):
+        verificar(not calculo.problemas_da_janela(inicio, fim, date(2026, 8, 17)),
+                  f"{rotulo} é janela coerente")
+    verificar(calculo.problemas_da_janela(date(2026, 8, 20), date(2026, 8, 10)),
+              "janela invertida é recusada")
+    verificar(calculo.problemas_da_janela(date(2026, 8, 1), date(2026, 8, 20),
+                                          date(2026, 8, 17)),
+              "fim posterior à recompra é recusado")
+    verificar(not calculo.janela_longa(date(2026, 7, 1), date(2026, 7, 31)),
+              "31 dias está dentro do usual")
+    verificar(calculo.janela_longa(date(2026, 1, 1), date(2026, 7, 31)),
+              "sete meses de janela vira aviso")
+
+
+def test_sobreposicao_de_janela():
+    print("\nSobreposição de janela com rodada já emitida (item 2)")
+    import tempfile
+    from core.historico import Historico
+    with tempfile.TemporaryDirectory() as pasta:
+        hist = Historico(Path(pasta) / "h.json")
+        hist.registrar(11, date(2026, 7, 24), date(2026, 7, 1), date(2026, 7, 15),
+                       ["1"], 0)
+        hist.registrar(13, date(2026, 8, 10), date(2026, 7, 1), date(2026, 7, 31),
+                       ["2"], 0)
+        hist.registrar(14, date(2026, 8, 17), date(2026, 8, 1), date(2026, 8, 14),
+                       ["3"], 0)
+
+        #  A janela da simulação que zerou o Termo: 16/07 a 31/07.
+        achados = hist.sobreposicoes(date(2026, 7, 16), date(2026, 7, 31))
+        verificar([r["numero"] for r in achados] == [13],
+                  "a janela 16/07–31/07 é acusada de invadir a rodada 13",
+                  str([r["numero"] for r in achados]))
+        verificar(not hist.sobreposicoes(date(2026, 8, 15), date(2026, 8, 28)),
+                  "a janela seguinte, 15/08–28/08, não invade nada")
+        verificar(not hist.sobreposicoes(date(2026, 8, 1), date(2026, 8, 14),
+                                         ignorar_numero=14),
+                  "reemitir a 14ª não esbarra na 14ª que já está no histórico")
+        verificar(hist.resumo_ultima()["numero"] == 14,
+                  "a última rodada é a de janela mais recente, não a de maior número")
+        verificar(not hist.numeracao_confiavel,
+                  "a numeração 11, 13, 14 é acusada de ter buraco")
+        verificar(hist.proximo_numero() == 15, "o próximo número é 15")
+
+
+def test_reemissao_nao_se_trava():
+    print("\nReemitir a mesma rodada não pode travar nos próprios títulos")
+    import tempfile
+    from core.historico import Historico
+    with tempfile.TemporaryDirectory() as pasta:
+        hist = Historico(Path(pasta) / "h.json")
+        hist.registrar(11, date(2026, 7, 24), date(2026, 7, 1), date(2026, 7, 15),
+                       ["165955407", "111"], 0)
+        hist.registrar(14, date(2026, 8, 18), date(2026, 8, 1), date(2026, 8, 15),
+                       ["222", "333"], 0)
+
+        verificar(hist.ids_recomprados == {"165955407", "111", "222", "333"},
+                  "sem número, a trava vê todos os títulos de todas as rodadas")
+        #  Reemitindo a 14ª: os títulos DELA saem da trava…
+        travados = hist.ids_recomprados_exceto(14)
+        verificar(travados == {"165955407", "111"},
+                  "reemitindo a 14ª, os títulos da própria 14ª não travam",
+                  str(sorted(travados)))
+        #  …mas os das outras rodadas continuam travados. É o caso da Cíntia:
+        #  cobrada na 11ª, voltou na 13ª porque o boleto não foi baixado.
+        verificar("165955407" in travados,
+                  "o título da Cíntia, cobrado na 11ª, continua travado")
+        verificar(hist.ids_recomprados_exceto(99) == hist.ids_recomprados,
+                  "rodada nova não perde nada da trava")
 
 
 def test_defasagem():
@@ -307,6 +385,270 @@ def test_aceite_12a():
 
 
 # ---------------------------------------------------------------------------
+#  Item 4 — o Termo vazio precisa levar a fórmula dentro
+# ---------------------------------------------------------------------------
+def test_termo_vazio_preserva_formulas():
+    print("\nTermo vazio ainda leva as fórmulas FILTER (item 4)")
+    import re
+    import tempfile
+    import zipfile
+    from core import excel_saida
+
+    if not config.TEMPLATE_PADRAO.exists():
+        print("  pulado: template não está em templates/")
+        return
+
+    class Fingido:
+        """O mínimo que ``excel_saida.gerar`` precisa, sem ler base nenhuma."""
+        def __init__(self):
+            self.template = config.TEMPLATE_PADRAO
+            self.linhas_termo = []
+            self.total_nominal = Decimal(0)
+            self.total_recompra = Decimal(0)
+            self.modo_simulacao = True
+            self.parametros = calculo.Parametros(
+                numero_rodada=99, data_recompra=date(2026, 8, 17),
+                janela_inicio=date(2026, 8, 1), janela_fim=date(2026, 8, 14),
+                juros_mora=Decimal("0.00033173"), multa=Decimal("0.02"))
+            self.conciliacao = type("C", (), {"casamentos": []})()
+            self.grafeno = type("G", (), {"registros": []})()
+
+    with tempfile.TemporaryDirectory() as pasta:
+        caminho = excel_saida.gerar(Fingido(), pasta)
+        with zipfile.ZipFile(caminho) as z:
+            alvo = next(n for n in z.namelist()
+                        if re.search(r"xl/worksheets/sheet\d+\.xml$", n)
+                        and b"FILTER" in z.read(n))
+            xml = z.read(alvo).decode("utf-8")
+
+    linha = config.TERMO_PRIMEIRA_LINHA
+    for letra in ("B", "C", "D", "E", "F", "G", "H"):
+        achado = re.search(rf'<c r="{letra}{linha}".*?</c>', xml, re.S)
+        verificar(achado is not None and "FILTER" in achado.group(0),
+                  f"{letra}{linha} leva a fórmula FILTER mesmo com Termo vazio",
+                  achado.group(0)[:120] if achado else "célula ausente")
+    verificar(f'ref="B{linha}:B{linha}"' in xml,
+              "a fórmula de matriz fica ancorada na própria linha 5")
+    #  Era este o falso positivo: sem valor e sem fórmula, ninguém percebia.
+    verificar("<v>" not in re.search(rf'<c r="B{linha}".*?</c>', xml, re.S).group(0),
+              "e sem valor em cache, porque não há título nenhum")
+
+
+def test_totais_em_cache():
+    """
+    Os totalizadores do template guardam o número **desta** rodada.
+
+    ``TERMO!C2/G2/H2`` e ``INFORMAÇÕES!D12/C19`` são fórmulas. A fórmula é
+    preservada, mas o valor em cache vinha do template: a rodada 14, com 2.638
+    títulos e R$ 3,71 MM, saía anunciando 680 títulos e R$ 894.362,31 para quem
+    lê o arquivo sem abrir no Excel.
+    """
+    print("\nTotalizadores levam o número da própria rodada, não o do template")
+    import re
+    import tempfile
+    from core import excel_saida
+
+    if not config.TEMPLATE_PADRAO.exists():
+        print("  pulado: template não está em templates/")
+        return
+
+    class Fingido:
+        def __init__(self):
+            self.template = config.TEMPLATE_PADRAO
+            self.total_nominal = Decimal("3630971.40")
+            self.total_recompra = Decimal("3712896.72")
+            self.modo_simulacao = True
+            self.parametros = calculo.Parametros(
+                numero_rodada=14, data_recompra=date(2026, 8, 18),
+                janela_inicio=date(2026, 8, 1), janela_fim=date(2026, 8, 15),
+                juros_mora=Decimal("0.00033173"), multa=Decimal("0.02"))
+            self.conciliacao = type("C", (), {"casamentos": []})()
+            self.grafeno = type("G", (), {"registros": []})()
+            self.linhas_termo = [
+                {"nome": f"SACADO {n}", "documento_formatado": "000.000.000-00",
+                 "id_titulo": str(n), "vencimento": date(2026, 8, 3),
+                 "data_recompra": date(2026, 8, 18),
+                 "valor_nominal": Decimal("100.00"),
+                 "valor_recompra": Decimal("102.00")}
+                for n in range(2638)]
+
+    with tempfile.TemporaryDirectory() as pasta:
+        caminho = excel_saida.gerar(Fingido(), pasta)
+        pacote = excel_saida.Pacote(caminho)
+        termo = pacote.aba(config.ABA_TERMO).corpo
+        info = pacote.aba(config.ABA_INFORMACOES).corpo
+
+    def cache(corpo, referencia):
+        achado = re.search(rf'<c r="{referencia}"[^>]*>(.*?)</c>', corpo, re.S)
+        if not achado:
+            return None, None
+        formula = re.search(r"<f\b.*?</f>", achado.group(1), re.S)
+        valor = re.search(r"<v>(.*?)</v>", achado.group(1), re.S)
+        return (formula.group(0) if formula else None,
+                valor.group(1) if valor else None)
+
+    for referencia, esperado, rotulo in (
+            ("C2", "2638", "quantidade de títulos"),
+            ("G2", "3630971.4", "total nominal"),
+            ("H2", "3712896.72", "total de recompra")):
+        formula, valor = cache(termo, referencia)
+        verificar(formula is not None,
+                  f"TERMO!{referencia} continua sendo fórmula")
+        verificar(valor is not None and abs(float(valor) - float(esperado)) < 0.01,
+                  f"TERMO!{referencia} tem o {rotulo} desta rodada",
+                  f"cache = {valor}, esperado {esperado}")
+
+    for referencia, esperado, rotulo in (
+            (config.CEL_QTD_RECOMPRA, "2638", "quantidade"),
+            (config.CEL_VALOR_TOTAL, "3712896.72", "valor total")):
+        formula, valor = cache(info, referencia)
+        verificar(formula is not None,
+                  f"INFORMAÇÕES!{referencia} continua sendo fórmula")
+        verificar(valor is not None and abs(float(valor) - float(esperado)) < 0.01,
+                  f"INFORMAÇÕES!{referencia} tem o {rotulo} desta rodada",
+                  f"cache = {valor}, esperado {esperado}")
+    #  Era o número do template que aparecia ali.
+    verificar("680" not in (cache(info, config.CEL_QTD_RECOMPRA)[1] or ""),
+              "o 680 do template não sobrou em INFORMAÇÕES!D12")
+
+
+# ---------------------------------------------------------------------------
+#  Aceite do item 1 — a chave 403 não substitui a chave composta
+# ---------------------------------------------------------------------------
+def test_ligacao_403_nao_e_chave_primaria():
+    print("\nA ligação '403'+NumeroTitulo só desempata; não cria par (item 1)")
+
+    def boleto(nosso, doc, status="Aberta (Vencida)", linha=2):
+        return Boleto(documento=doc, vencimento=date(2026, 8, 1),
+                      valor=Decimal("100.00"), status=status, linha=linha,
+                      nosso_numero=nosso, chave_boleto=nz.so_digitos(nosso))
+
+    def titulo(numero, doc):
+        return Titulo(id_titulo="1", numero_titulo=numero, documento=doc,
+                      vencimento=date(2026, 8, 1), valor_nominal=Decimal("100.00"),
+                      linha=2, chave_boleto=nz.chave_boleto(numero),
+                      chave=nz.chave(doc, date(2026, 8, 1), Decimal("100.00")),
+                      chave_parcial=nz.chave_parcial(doc, date(2026, 8, 1)))
+
+    #  O caso medido 2.451 vezes na base da 14ª: o "403"+NumeroTitulo existe na
+    #  Grafeno, com o mesmo vencimento e o mesmo valor, e é de OUTRO CPF.
+    alheio = boleto("403382661122", "41999347749")
+    meu = titulo("382661122", "69261881734")
+    resultado = conciliacao.conciliar([meu], [alheio])
+    verificar(not resultado.casados,
+              "o boleto de outro CPF não é casado, mesmo com a ligação batendo")
+    verificar(resultado.casamentos[0].causa is not None,
+              "o título fica classificado como exceção, não emparelhado")
+
+    #  O uso legítimo: dois boletos que a chave composta já validou, e a ligação
+    #  diz qual é o do título.
+    do_titulo = boleto("403382661122", "69261881734", "Aberta (Vencida)", 10)
+    vizinho = boleto("403382661130", "69261881734", "Baixada", 11)
+    escolhido = conciliacao.escolher_boleto([vizinho, do_titulo], meu)
+    verificar(escolhido is do_titulo,
+              "entre boletos da mesma chave, a ligação aponta o do título")
+
+
+# ---------------------------------------------------------------------------
+#  Teste de aceite pedido: rodada 14, recompra 17/08, janela 01/08 a 14/08
+# ---------------------------------------------------------------------------
+def _arquivo_da_14a():
+    pasta = config.PASTA_ONEDRIVE / "14.Recompra_17_08_2026"
+    if not pasta.exists():
+        return None
+    from core.retroativo import _escolher_arquivo
+    return _escolher_arquivo(pasta)
+
+
+def test_aceite_14a():
+    """
+    A 14ª v1.1 (janela 01–15/08, recompra 18/08), com o **histórico real**.
+
+    A rodada 14 já está registrada no histórico, e isso é parte do teste: é a
+    reemissão que a trava contra recompra repetida não pode impedir. Sem a
+    exclusão da própria rodada, os 2.639 títulos dela voltariam como "já
+    recomprados", todos seriam barrados e o Termo iria a zero.
+
+    O alvo **não** é 2.639, é 2.638. O Termo manual trouxe um título a mais:
+    OLGA ALVES RODRIGUES tem dois títulos vencendo em 11/08 e o de R$ 1.472,26
+    tem boleto ``Baixada`` — a cobrança foi cancelada e reemitida como a de
+    R$ 1.608,78, que é a que está vencida em aberto e entra no Termo pela linha
+    do irmão. O manual cobrou os dois: R$ 1.505,13 em duplicidade.
+    """
+    print("\nAceite — 14ª recompra v1.1 (janela 01–15/08, recompra 18/08)")
+    arquivo = _arquivo_da_14a()
+    if arquivo is None:
+        print("  pulado: a pasta 14.Recompra_17_08_2026 não está sincronizada")
+        return
+    if not config.ARQUIVO_HISTORICO.exists():
+        print("  pulado: histórico não foi populado ainda "
+              "(core/semente_historico.py)")
+        return
+    print(f"  base: {arquivo.name}")
+
+    resultado = motor.conciliar({
+        "template": config.TEMPLATE_PADRAO,
+        "numero_rodada": 14,
+        "data_recompra": date(2026, 8, 18),
+        "janela_inicio": date(2026, 8, 1),
+        "janela_fim": date(2026, 8, 15),
+        "fonte_vortx": "arquivo", "arquivo_vortx": str(arquivo),
+        "fonte_grafeno": "arquivo", "arquivo_grafeno": str(arquivo),
+        "data_extracao_grafeno": date(2026, 8, 18),
+        "modo_simulacao": True,
+        "gravar_snapshot": False,
+        "historico": None,          # o histórico real, com a 14ª dentro
+    })
+
+    quantidade = len(resultado.linhas_termo)
+    total = resultado.total_recompra
+    emitidos = {i for i, _ in _termo_emitido(arquivo)}
+    calculados = {l["id_titulo"] for l in resultado.linhas_termo}
+
+    print(f"  → motor  {quantidade} títulos · R$ {total:.2f}")
+    print(f"    manual {len(emitidos)} títulos · R$ 3715609.43")
+
+    verificar(quantidade == 2638,
+              "apura 2.638 títulos — o manual menos o título duplicado",
+              f"obtidos {quantidade} (diferença de {quantidade - 2638})")
+    verificar(not (calculados - emitidos),
+              "não traz nenhum título que o Termo manual não tenha",
+              f"a mais: {sorted(calculados - emitidos)[:5]}")
+    verificar(emitidos - calculados == {"165960004"},
+              "a única diferença é o 165960004 (OLGA), de boleto baixado",
+              f"diferença: {sorted(emitidos - calculados)}")
+    #  R$ 3.715.609,43 do manual menos os R$ 1.505,13 da linha em duplicidade.
+    verificar(abs(total - Decimal("3714104.31")) < Decimal("0.02"),
+              "e o valor bate com o manual menos os R$ 1.505,13 cobrados a mais",
+              f"obtido {total}")
+
+    niveis = {v.chave: v.nivel for v in resultado.validacoes}
+    verificar(niveis.get("sem_recompra_repetida") == "OK",
+              "reemitir a 14ª não trava nos títulos da própria 14ª",
+              str(niveis.get("sem_recompra_repetida")))
+    verificar(not resultado.bloqueado,
+              "nada bloqueia a reemissão",
+              str([v.titulo for v in resultado.erros]))
+    for chave in ("termo_nao_vazio", "janela_sem_sobreposicao", "janela_coerente",
+                  "convergencia", "grafeno_frescor"):
+        verificar(niveis.get(chave) == "OK", f"validação {chave} em OK",
+                  str(niveis.get(chave)))
+    verificar(resultado.grafeno_data_conteudo == date(2026, 8, 18),
+              "a data da Grafeno sai do conteúdo (18/08), não do arquivo",
+              str(resultado.grafeno_data_conteudo))
+    #  O caso da Olga tem de aparecer, e como resolvido: a dívida dela já está
+    #  no Termo pela linha do irmão, então não é aviso, é OK explicado.
+    baixado = next(v for v in resultado.validacoes
+                   if v.chave == "baixado_com_irmao")
+    verificar("165960004" in baixado.dados.get("cobertos", []),
+              "o caso da Olga é identificado como já coberto pelo irmão",
+              baixado.detalhe[:120])
+    print(f"    defasagem medida: {resultado.defasagem_dias} dia(s) útil(eis) — "
+          f"Vórtx {nz.br(resultado.data_extracao_vortx)}, Grafeno "
+          f"{nz.br(resultado.data_extracao_grafeno)}")
+
+
+# ---------------------------------------------------------------------------
 def main():
     print("=" * 72)
     print("  Testes do motor de recompra — FIDC Leve Saúde")
@@ -315,14 +657,20 @@ def main():
     test_normalizacao()
     test_prioridade_status()
     test_desempate_por_numero_titulo()
+    test_ligacao_403_nao_e_chave_primaria()
     test_deduplicacao()
     test_janela()
+    test_sobreposicao_de_janela()
+    test_reemissao_nao_se_trava()
     test_defasagem()
     test_calculo()
+    test_termo_vazio_preserva_formulas()
+    test_totais_em_cache()
 
     if "--rapido" not in sys.argv:
         test_aceite_11a()
         test_aceite_12a()
+        test_aceite_14a()
     else:
         print("\n(aceite sobre os arquivos reais pulado: --rapido)")
 

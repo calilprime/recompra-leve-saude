@@ -82,6 +82,9 @@ class Conciliacao:
         #  desempate — a fórmula testa a ligação primeiro, então tem de dar o
         #  mesmo; se não der, a validação de convergência mostra.
         self.desempates_divergentes = []
+        #  Medição, nesta base, do que a ligação "403"+NumeroTitulo faria se
+        #  fosse promovida a chave. Ver ``_medir_ligacao``.
+        self.diagnostico_ligacao = {}
         self.contagens = {}
 
     @property
@@ -269,6 +272,8 @@ def conciliar(titulos, boletos, log=None):
     )
     resultado.boletos_sem_titulo = [b for b in boletos if id(b) not in boletos_usados]
 
+    resultado.diagnostico_ligacao = _medir_ligacao(titulos, boletos, por_chave)
+
     resultado.contagens = {
         "titulos_lidos": len(titulos) + len(descartados),
         "titulos": len(titulos),
@@ -286,6 +291,22 @@ def conciliar(titulos, boletos, log=None):
         "boletos_sem_titulo": len(resultado.boletos_sem_titulo),
         "cobertura": resultado.cobertura,
     }
+    resultado.contagens.update(
+        {f"ligacao_{k}": v for k, v in resultado.diagnostico_ligacao.items()})
+
+    d = resultado.diagnostico_ligacao
+    if d.get("pares"):
+        log(f"  Diagnóstico da ligação \"{config.PREFIXO_NOSSO_NUMERO}\"+"
+            f"NumeroTitulo, se fosse usada como chave: formaria {d['pares']} "
+            f"pares, {d['outro_sacado']} deles com boleto de OUTRO sacado "
+            f"({d['outro_sacado'] / d['pares'] * 100:.1f}%). "
+            f"Encontraria {d['so_ela']} títulos que a chave composta não "
+            f"encontra, e {d['so_ela_outro_sacado']} desses "
+            f"({d['so_ela_outro_sacado'] / d['so_ela'] * 100:.1f}%) seriam do "
+            f"sacado errado." if d.get("so_ela") else
+            f"  Diagnóstico da ligação: {d['pares']} pares, "
+            f"{d['outro_sacado']} de outro sacado.",
+            "aviso" if d.get("so_ela_outro_sacado") else "info")
 
     log(f"  Conciliação: {len(resultado.casados)} de {len(titulos)} títulos com "
         f"boleto ({resultado.cobertura * 100:.2f}% de cobertura).",
@@ -301,6 +322,51 @@ def conciliar(titulos, boletos, log=None):
                 f"Nosso_Número apontou um status diferente do que a prioridade "
                 f"escolheria — estão no relatório de exceções.", "aviso")
     return resultado
+
+
+def _medir_ligacao(titulos, boletos, por_chave):
+    """
+    Mede, nesta base, o que a ligação ``"403"+NumeroTitulo`` faria como chave.
+
+    Não muda o resultado da conciliação: é diagnóstico, e existe para que a
+    decisão de **não** promover a ligação a chave primária seja reconferida a
+    cada rodada, em vez de ficar valendo por uma medição de agosto de 2026.
+
+    A pergunta que ela responde é a única que importa: dos pares que a ligação
+    formaria, quantos são de outro sacado? Na base da 14ª rodada foram 2.452 de
+    56.927 no total (4,3%) — e, entre os títulos que **só** a ligação encontra,
+    2.451 de 2.486, ou 98,6%. A ligação acerta o que a chave composta já acerta
+    e erra quase tudo que acrescenta.
+
+    Se algum dia estes números virarem zero, a conversa muda e o plano deve ser
+    revisto. Enquanto não virarem, a ligação continua servindo só de desempate.
+    """
+    por_nosso = {}
+    for boleto in boletos:
+        if boleto.chave_boleto:
+            #  Nosso_Número é chave única na Grafeno (medido: 158.918 valores
+            #  distintos em 158.918 linhas). Se algum dia repetir, o primeiro
+            #  fica — e o diagnóstico segue valendo como ordem de grandeza.
+            por_nosso.setdefault(boleto.chave_boleto, boleto)
+
+    pares = outro_sacado = so_ela = so_ela_outro_sacado = 0
+    for titulo in titulos:
+        if not titulo.chave_boleto:
+            continue
+        boleto = por_nosso.get(titulo.chave_boleto)
+        if boleto is None:
+            continue
+        pares += 1
+        errado = boleto.documento != titulo.documento
+        if errado:
+            outro_sacado += 1
+        if not por_chave.get(titulo.chave):
+            so_ela += 1
+            if errado:
+                so_ela_outro_sacado += 1
+    return {"pares": pares, "outro_sacado": outro_sacado, "so_ela": so_ela,
+            "so_ela_outro_sacado": so_ela_outro_sacado,
+            "boletos_com_ligacao": len(por_nosso)}
 
 
 def escolher_boleto(candidatos, titulo=None):

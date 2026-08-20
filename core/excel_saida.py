@@ -396,14 +396,32 @@ def _escrever_aba_dados(pacote, nome_aba, registros, colunas_formula, log=None):
 # ---------------------------------------------------------------------------
 #  Aba TERMO DE RECOMPRA
 # ---------------------------------------------------------------------------
-def _escrever_termo(pacote, linhas_termo, log=None):
+def _escrever_termo(pacote, linhas_termo, totais=None, log=None):
     """
     Escreve o Termo calculado pelo motor e reancora as fórmulas de matriz.
 
-    Os valores gravados são os do motor; as fórmulas ficam ao lado, como
-    conferência independente (seção 5.3). A validação de convergência já
-    garantiu que os dois caminhos dão o mesmo resultado — se não dessem, a
-    emissão nem teria chegado aqui.
+    Os valores gravados são os do motor; as fórmulas ``FILTER`` ficam na linha
+    âncora, como conferência independente (seção 5.3). A validação de
+    convergência já garantiu que os dois caminhos dão o mesmo resultado — se não
+    dessem, a emissão nem teria chegado aqui.
+
+    **A linha âncora é escrita sempre**, inclusive quando o Termo sai vazio.
+    Isso é o defeito que a simulação de 14/08 revelou: o laço percorria
+    ``linhas_termo`` e a fórmula ia só na primeira iteração, então com zero
+    títulos nada era escrito — ``B5:H5`` saía em branco, as ``FILTER`` do
+    template desapareciam do arquivo entregue, e a validação "Convergência
+    Python ↔ Excel" comparava 0 com 0 e dizia ``OK``. Não convergia: não havia
+    o que convergir. Com a âncora sempre presente, o arquivo vazio ainda leva a
+    fórmula dentro, e quem abrir vê o Excel recalcular zero — que é uma
+    informação, ao contrário de uma célula em branco.
+
+    Sobre gravar valor **e** fórmula na mesma faixa: não há conflito. É assim
+    que o próprio Excel guarda um intervalo derramado — a célula mestra leva
+    ``<f t="array" ref="B5:H2330">`` e as demais levam só o valor em cache. O
+    valor em cache não é decoração: é o que os BIs da casa e o
+    ``retroativo.ler_termo_emitido`` leem, porque leem com ``data_only=True`` e
+    fórmula sem cache chega como ``None``. Tirar os valores para "preservar a
+    fórmula" cegaria os dois.
     """
     log = log or (lambda *a, **k: None)
     aba = pacote.aba(config.ABA_TERMO)
@@ -415,47 +433,65 @@ def _escrever_termo(pacote, linhas_termo, log=None):
     #  moeda no arquivo entregue.
     modelo = (aba.estilos_da_linha(primeira)
               or aba.estilos_da_linha(primeira + 1) or {})
-    modelo_ancora = modelo
 
+    #  A coluna A do template guarda um "." de marcação de área. Mantém.
+    ancora_a = re.search(r'<c r="A\d+"[^>]*>.*?</c>',
+                         aba.linhas.get(primeira, ("", ""))[1] or "", re.S)
+
+    #  As linhas de cabeçalho vão inteiras, como estão — menos o cache dos
+    #  totalizadores C2, G2 e H2, que ainda é o do template.
+    totais = totais or {}
     partes = []
     for numero in sorted(aba.linhas):
         if numero >= primeira:
             continue
         attrs, corpo = aba.linhas[numero]
+        #  A referência já carrega o número da linha, então só casa na linha
+        #  certa; nas outras ``_atualizar_cache`` devolve o corpo intacto.
+        for referencia, campo in config.TERMO_TOTAIS.items():
+            corpo = _atualizar_cache(corpo, referencia, totais.get(campo))
         partes.append(f"<row{attrs}>{corpo}</row>")
 
-    for deslocamento, linha in enumerate(linhas_termo):
+    #  ``[None]`` é o Termo vazio: uma passada só, que escreve a âncora com a
+    #  fórmula e sem valor em cache.
+    for deslocamento, linha in enumerate(linhas_termo or [None]):
         numero = primeira + deslocamento
-        estilos = modelo_ancora if deslocamento == 0 else modelo
         celulas = []
-        #  A coluna A do template guarda um "." de marcação de área. Mantém.
-        ancora_a = re.search(r'<c r="A\d+"[^>]*>.*?</c>',
-                             aba.linhas.get(primeira, ("", ""))[1] or "", re.S)
-        if ancora_a and deslocamento < len(linhas_termo):
+        if ancora_a:
             celulas.append(re.sub(r'r="A\d+"', f'r="A{numero}"', ancora_a.group(0)))
         for letra, campo in config.TERMO_COLUNAS.items():
-            valor = linha[campo]
-            if letra == "B":
+            valor = None if linha is None else linha[campo]
+            if letra == "B" and valor is not None:
                 valor = str(valor).upper()
             formula = FORMULAS_TERMO[letra] if deslocamento == 0 else None
             array_ref = (f"{letra}{primeira}:{letra}{ultima}"
                          if deslocamento == 0 else None)
             celulas.append(_celula(f"{letra}{numero}", valor,
-                                   estilo=estilos.get(letra),
+                                   estilo=modelo.get(letra),
                                    formula=formula, array_ref=array_ref))
         partes.append(f'<row r="{numero}" spans="1:13">{"".join(celulas)}</row>')
 
     pacote.gravar_aba(aba, aba.xml_com("".join(partes), f"A1:M{max(ultima, 4)}"))
     log(f"  Aba {config.ABA_TERMO}: {len(linhas_termo)} linhas "
-        f"({primeira} a {ultima}).")
+        f"({primeira} a {ultima}); fórmulas FILTER ancoradas em "
+        f"B{primeira}:H{primeira}."
+        + ("  ← Termo vazio: só a fórmula, sem valores."
+           if not linhas_termo else ""),
+        "aviso" if not linhas_termo else "info")
     return ultima
 
 
 # ---------------------------------------------------------------------------
 #  Aba INFORMAÇÕES
 # ---------------------------------------------------------------------------
-def _escrever_informacoes(pacote, parametros, log=None):
-    """Grava só os parâmetros da rodada. Juros e multa não são tocados."""
+def _escrever_informacoes(pacote, parametros, totais=None, log=None):
+    """
+    Grava os parâmetros da rodada. Juros e multa não são tocados.
+
+    ``D12`` (quantidade) e ``C19`` (valor total) são fórmulas que leem o Termo:
+    a fórmula fica, o cache é atualizado. Sem isso o arquivo entregue anunciava
+    ``QTD RECOMPRA`` = 680 sobre um Termo de 2.638 linhas.
+    """
     log = log or (lambda *a, **k: None)
     aba = pacote.aba(config.ABA_INFORMACOES)
     valores = {
@@ -469,10 +505,71 @@ def _escrever_informacoes(pacote, parametros, log=None):
         if valor is None:
             continue
         corpo = _substituir_celula(corpo, referencia, valor)
+
+    totais = totais or {}
+    for referencia, campo in config.INFORMACOES_TOTAIS.items():
+        corpo = _atualizar_cache(corpo, referencia, totais.get(campo))
+
     pacote.gravar_aba(aba, aba.xml_com(corpo))
     log(f"  Aba {config.ABA_INFORMACOES}: rodada {parametros.numero_rodada}, "
         f"recompra {nz.br(parametros.data_recompra)}, janela "
-        f"{nz.br(parametros.janela_inicio)}–{nz.br(parametros.janela_fim)}.")
+        f"{nz.br(parametros.janela_inicio)}–{nz.br(parametros.janela_fim)}, "
+        f"QTD {totais.get('quantidade')}, total R$ "
+        f"{totais.get('total_recompra') or 0:,.2f}"
+        .replace(",", "@").replace(".", ",").replace("@", ".") + ".")
+
+
+def _atualizar_cache(corpo, referencia, valor):
+    """
+    Reescreve o **valor em cache** de uma célula de fórmula, mantendo a fórmula.
+
+    A estrutura do arquivo é congelada, então totalizadores como
+    ``COUNTA(C5:C99984)`` e ``SUBTOTAL(9,H5:H1048576)`` continuam sendo fórmula.
+    Só que fórmula no ``.xlsx`` guarda dois pedaços: a expressão (``<f>``) e o
+    último resultado calculado (``<v>``). Ao copiar o template, a expressão vem
+    certa e o resultado vem **do template** — 680 títulos e R$ 894.362,31, os
+    números da rodada que serviu de molde.
+
+    O Excel corrige isso ao abrir, porque ``forcar_recalculo`` liga o
+    ``fullCalcOnLoad``. Quem lê o arquivo por fora, não: os BIs da casa e
+    ``openpyxl`` com ``data_only=True`` leem o cache e acreditam nele. Foi assim
+    que a rodada 14 saiu com ``QTD RECOMPRA`` = 680 no arquivo entregue.
+
+    Devolve o corpo sem mexer em nada quando a célula não existe ou não tem
+    fórmula — aí não há cache a corrigir e inventar um seria pior.
+    """
+    padrao = re.compile(rf'<c r="{referencia}"(?P<attrs>[^>]*?)>(?P<body>.*?)</c>',
+                        re.S)
+    achado = padrao.search(corpo)
+    if not achado:
+        return corpo
+    formula = re.search(r"<f\b.*?</f>|<f\b[^>]*/>", achado.group("body"), re.S)
+    if not formula:
+        return corpo
+
+    attrs = achado.group("attrs") or ""
+    #  O tipo antigo sai: um cache numérico não pode ficar marcado como erro
+    #  (``t="e"``) nem como texto de uma execução anterior.
+    attrs = re.sub(r'\s+t="[^"]*"', "", attrs)
+    attrs = re.sub(r'\s+vm="[^"]*"', "", attrs)
+    if isinstance(valor, str):
+        attrs += ' t="str"'
+        cache = f"<v>{_escapar(valor)}</v>"
+    elif valor is None:
+        cache = ""
+    else:
+        cache = f"<v>{_conteudo_numerico(valor)}</v>"
+    nova = f'<c r="{referencia}"{attrs}>{formula.group(0)}{cache}</c>'
+    return corpo[:achado.start()] + nova + corpo[achado.end():]
+
+
+def _totais_do_resultado(resultado):
+    """Os números que os totalizadores do template calculam."""
+    return {
+        "quantidade": len(resultado.linhas_termo),
+        "total_nominal": resultado.total_nominal,
+        "total_recompra": resultado.total_recompra,
+    }
 
 
 def _substituir_celula(corpo, referencia, valor):
@@ -522,8 +619,9 @@ def gerar(resultado, pasta_destino, log=None):
     _escrever_aba_dados(pacote, config.ABA_GRAFENO,
                         [b.bruto for b in resultado.grafeno.registros],
                         FORMULAS_GRAFENO, log=log)
-    _escrever_termo(pacote, resultado.linhas_termo, log=log)
-    _escrever_informacoes(pacote, resultado.parametros, log=log)
+    totais = _totais_do_resultado(resultado)
+    _escrever_termo(pacote, resultado.linhas_termo, totais=totais, log=log)
+    _escrever_informacoes(pacote, resultado.parametros, totais=totais, log=log)
     pacote.forcar_recalculo()
 
     destino.parent.mkdir(parents=True, exist_ok=True)

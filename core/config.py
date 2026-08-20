@@ -65,19 +65,45 @@ TOLERANCIA_VALOR = Decimal("0.05")
 #
 #      NumeroTitulo 382477119  ->  Nosso_Número 403382477119
 #
-#  Medido no arquivo da 12ª: 62.698 boletos seguem esse padrão.
+#  **Isto não substitui a chave composta, e a distinção é cara.** Foi medido
+#  duas vezes, e as duas medições dizem o mesmo.
 #
-#  **Isto não substitui a chave composta, e a distinção é cara.** Usada
-#  sozinha, a ligação encontra 2.493 títulos a mais — e em 79% deles o boleto é
-#  de OUTRA pessoa. A numeração é sequencial e densa dos dois lados (distância
-#  típica de 8 entre vizinhos), então, quando o título não tem boleto,
-#  "403"+NumeroTitulo cai no boleto do vizinho.
+#  Medição sobre a base da 14ª rodada (57.000 títulos, 158.918 boletos), que é
+#  a mais limpa que existe — o Nosso_Número é chave única ali, 158.918 valores
+#  distintos em 158.918 linhas, e "403"+NumeroTitulo encontra boleto para
+#  56.927 títulos, 99,87%. O que essa cobertura esconde:
+#
+#      pares que a ligação forma ................. 56.927
+#        do MESMO sacado .......................... 54.475  (95,7%)
+#        de OUTRO sacado .......................... 2.452   (4,3%)
+#
+#      títulos que SÓ a ligação encontra ......... 2.486
+#        de OUTRO sacado .......................... 2.451   (98,6%)
+#
+#  Ou seja: tudo que a ligação acrescenta sobre a chave composta é, quase
+#  inteiramente, boleto de outra pessoa. A causa é a densidade: os dois lados
+#  numeram em sequência com distância típica de 8 entre vizinhos, e a Grafeno
+#  tem 158.918 boletos para 57.000 títulos cedidos. Quando o título não tem
+#  boleto na carteira cedida, "403"+NumeroTitulo cai em cima do boleto de um
+#  vizinho — com o mesmo vencimento e o mesmo valor, porque são mensalidades do
+#  mesmo plano no mesmo ciclo. O par parece perfeito e é de outro CPF.
+#
+#  Efeito no Termo, na janela 01–14/08 da 14ª rodada:
+#
+#      chave composta ..... 2.326 títulos   (= o Termo manual, exato)
+#      ligação sozinha .... 2.320 títulos
 #
 #  O uso legítimo é estreito: **desempatar entre os boletos que a chave
 #  composta já validou** por documento, vencimento e valor. Aí ela diz qual dos
 #  candidatos é de fato daquele título, em vez de escolher pela prioridade de
-#  status. Nunca cria par novo.
+#  status. Nunca cria par novo. Na base da 14ª esse desempate concorda com a
+#  prioridade em 54.440 casos e discorda em 1 — que vai para o relatório.
 PREFIXO_NOSSO_NUMERO = "403"
+
+#  116 boletos da base da 14ª têm Nosso_Número de 8 dígitos, com outros
+#  prefixos (923, 915, 798, 900...). São cobranças de outra origem; para elas a
+#  ligação simplesmente não existe, e a chave composta responde sozinha.
+COMPRIMENTO_NOSSO_NUMERO = 12
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +112,32 @@ PREFIXO_NOSSO_NUMERO = "403"
 #  Medido entre a v1.1 e a v1.5 da 12ª: 74 títulos e R$ 89.640,46 em 4 dias úteis.
 TITULOS_POR_DIA_UTIL = 19          # faixa observada: 18 a 20
 VALOR_POR_DIA_UTIL = Decimal("22000")
+
+
+# ---------------------------------------------------------------------------
+#  Janela (seção 8.5, reescrita depois da simulação de 14/08)
+# ---------------------------------------------------------------------------
+#  Folga entre o fim da janela e a data da recompra. É sugestão editável, não
+#  regra: a 14ª fechou em 14/08 para recomprar em 17/08.
+DIAS_FOLGA_JANELA = 3
+
+#  Acima disto a janela vira aviso. As rodadas reais ficaram entre 14 e 31 dias;
+#  uma janela muito maior costuma ser erro de digitação de mês ou ano.
+DIAS_JANELA_USUAL = 40
+
+
+# ---------------------------------------------------------------------------
+#  Frescor da base da Grafeno (item 3)
+# ---------------------------------------------------------------------------
+#  Quantos dias úteis de diferença entre a data de extração informada na tela e
+#  a que se deduz do conteúdo (``MAX(Data_Criação)``, ``MAX(Data_Pagamento)``)
+#  ainda são normais.
+#
+#  Alguma diferença é esperada e não indica nada: numa extração de sábado o
+#  último pagamento é de sexta. O que não é normal é a diferença medida em
+#  14/08 — conteúdo até 08/08 sobre uma extração declarada de 14/08, cinco dias
+#  úteis. Aí a base é de outra semana e a rodada tem de parar.
+TOLERANCIA_FRESCOR_DIAS_UTEIS = 1
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +266,32 @@ TERMO_COLUNAS = {          # coluna da planilha -> campo do motor
     "F": "data_recompra",
     "G": "valor_nominal",
     "H": "valor_recompra",
+}
+
+#  Totalizadores do cabeçalho do Termo. São **fórmulas** no template:
+#
+#      C2 = COUNTA(C5:C99984)
+#      G2 = SUBTOTAL(9,G5:G1048576)
+#      H2 = SUBTOTAL(9,H5:H1048576)
+#
+#  A fórmula é preservada, mas o **valor em cache** delas tem de ser reescrito.
+#  Sem isso o arquivo entregue carrega o número do template: a rodada 14, com
+#  2.638 títulos e R$ 3,71 MM, saía dizendo 680 títulos e R$ 894.362,31 até
+#  alguém abrir no Excel e deixar recalcular. Quem lê o arquivo por fora — os
+#  BIs da casa, o openpyxl com ``data_only=True`` — nunca recalcula e vê o
+#  número velho.
+TERMO_TOTAIS = {
+    "C2": "quantidade",
+    "G2": "total_nominal",
+    "H2": "total_recompra",
+}
+
+#  Mesma coisa na aba INFORMAÇÕES:
+#      D12 = COUNTA('TERMO DE RECOMPRA'!C5:C99984)
+#      C19 = IFERROR('TERMO DE RECOMPRA'!$H$2,0)
+INFORMACOES_TOTAIS = {
+    CEL_QTD_RECOMPRA: "quantidade",
+    CEL_VALOR_TOTAL: "total_recompra",
 }
 
 #  Regra de nome do arquivo, conforme INFORMAÇÕES!C6, com a vírgula decimal que

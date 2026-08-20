@@ -144,26 +144,52 @@ def estado_inicial():
     }
 
     hist = historico_mod.Historico()
-    dados["numero_rodada"] = hist.proximo_numero()
     dados["rodadas_no_historico"] = len(hist.rodadas)
     dados["titulos_no_historico"] = len(hist.ids_recomprados)
-
-    inicio, fim = calculo.sugerir_janela(hoje)
-    dados["janela_inicio"] = nz.iso(inicio)
-    dados["janela_fim"] = nz.iso(fim)
+    dados["ultima_rodada"] = hist.resumo_ultima()
+    dados["numeracao_confiavel"] = hist.numeracao_confiavel
     dados["data_recompra"] = hoje.isoformat()
 
-    #  A janela que emenda com a rodada anterior vence a sugerida pela data:
-    #  é ela que não deixa lacuna nem sobreposição (seção 8.5).
+    #  A janela vem do histórico, não do calendário. A regra quinzenal que
+    #  ficava aqui produziu 16/07–31/07 para a recompra de 14/08 — uma janela já
+    #  consumida pela rodada anterior — e o Termo saiu vazio.
     _, fim_anterior = hist.janela_anterior()
-    if fim_anterior:
-        emenda_inicio, emenda_fim = calculo.janela_seguinte(fim_anterior)
-        dados["janela_inicio"] = nz.iso(emenda_inicio)
-        dados["janela_fim"] = nz.iso(emenda_fim)
+    inicio, fim = calculo.sugerir_janela(hoje, fim_anterior)
+    dados["janela_inicio"] = nz.iso(inicio)
+    dados["janela_fim"] = nz.iso(fim)
+
+    #  O número da rodada só é sugerido quando a numeração do histórico forma
+    #  sequência. Não formando, quem opera preenche: um palpite errado aqui sai
+    #  no nome do arquivo e no Termo que vai para assinatura.
+    if hist.rodadas and hist.numeracao_confiavel:
+        dados["numero_rodada"] = hist.proximo_numero()
+    else:
+        dados["numero_rodada"] = ""
+        dados["exige_numero"] = True
+
+    if not hist.rodadas:
         dados["avisos"].append(
-            f"Janela pré-preenchida para emendar com a rodada "
-            f"{hist.ultima.get('numero')}, que terminou em {nz.br(fim_anterior)}."
+            "Histórico de recompras vazio: a numeração da rodada, a trava contra "
+            "recompra repetida e a checagem de janela já usada não funcionam sem "
+            "ele. Use 'Popular o histórico' antes de rodar."
         )
+    else:
+        if not fim_anterior:
+            dados["avisos"].append(
+                "A última rodada do histórico não tem janela registrada — "
+                "preencha o início da janela à mão."
+            )
+        if not hist.numeracao_confiavel:
+            numeros = sorted(r.get("numero") for r in hist.rodadas
+                             if r.get("numero"))
+            faltando = [n for n in range(min(numeros), max(numeros) + 1)
+                        if n not in numeros] if numeros else []
+            dados["avisos"].append(
+                "A numeração das rodadas do histórico não forma sequência"
+                + (f" (falta a {', '.join(map(str, faltando))}ª)" if faltando else "")
+                + " — informe o número desta rodada à mão e confira contra o "
+                  "Termo assinado da rodada anterior."
+            )
 
     if not template.exists():
         dados["avisos"].append(
@@ -198,9 +224,31 @@ def estado_inicial():
 
 
 def sugerir_janela(data_recompra):
-    """A janela quinzenal da data escolhida, para a tela repreencher sozinha."""
-    inicio, fim = calculo.sugerir_janela(nz.data(data_recompra))
-    return {"inicio": nz.iso(inicio), "fim": nz.iso(fim)}
+    """
+    A janela sugerida para a data escolhida, para a tela repreencher sozinha.
+
+    Início pelo histórico, fim pela data da recompra. Nunca por dia do mês.
+    """
+    hist = historico_mod.Historico()
+    _, fim_anterior = hist.janela_anterior()
+    inicio, fim = calculo.sugerir_janela(nz.data(data_recompra), fim_anterior)
+    return {"inicio": nz.iso(inicio), "fim": nz.iso(fim),
+            "ultima_rodada": hist.resumo_ultima()}
+
+
+def semear_historico(cfg, log):
+    """
+    Popula o ``historico_recompras.json`` a partir da pasta do OneDrive.
+
+    Fora do fluxo em dois tempos: não emite Termo, não escreve no OneDrive, só
+    lê as rodadas já feitas e monta a trava. Ver ``core/semente_historico.py``.
+    """
+    from core import semente_historico
+    return semente_historico.semear(
+        raiz=cfg.get("pasta_onedrive") or config.PASTA_ONEDRIVE,
+        sobrescrever=bool(cfg.get("sobrescrever")),
+        log=log,
+    )
 
 
 def testar_vortx():
@@ -552,8 +600,10 @@ PAGINA_HTML = r"""<!doctype html>
           <input type="date" id="janela_fim">
         </div>
       </div>
-      <p class="hint">Quinzena estrita: dia 1 ao 15, ou dia 16 ao último dia do mês.
-         Muda sozinha quando você troca a data da recompra — pode ajustar à mão.</p>
+      <p class="hint">O início emenda com o fim da rodada anterior, do histórico; o fim vem da data
+         da recompra, com três dias de folga. <b>Não existe regra de dia do mês</b> — foi ela que
+         zerou o Termo de 14/08. Ajuste à mão quando precisar.</p>
+      <div class="nota" id="notaUltimaRodada"></div>
 
       <h3>Juros e multa · da aba INFORMAÇÕES</h3>
       <div class="dois">
@@ -610,10 +660,14 @@ PAGINA_HTML = r"""<!doctype html>
         <p class="hint">Aba <input type="text" id="aba_grafeno" style="width:120px;display:inline-block;padding:4px 8px;font-size:12px" value="GRAFENO">
            — o mesmo arquivo pode servir às duas fontes, quando for uma rodada anterior.</p>
         <div class="field" style="margin-top:12px">
-          <label>Data da extração da Grafeno</label>
+          <label>Data da extração da Grafeno <span style="font-weight:400;color:var(--muted)">· só conferência</span></label>
           <input type="date" id="data_extracao_grafeno">
-          <p class="hint">O export não traz essa data em coluna nenhuma. Em branco, vale a data de
-             modificação do arquivo. É por ela que a defasagem é medida.</p>
+          <p class="hint">O export não traz essa data em coluna nenhuma, então a automação a
+             <b>deduz do conteúdo</b>: <code>MAX(Data_Criação)</code> e <code>MAX(Data_Pagamento)</code>,
+             a maior das duas. É essa data que mede a defasagem — nunca a data de modificação do
+             arquivo, que faz base velha parecer do dia. O que você digitar aqui serve só para
+             conferir: se estiver mais de um dia útil à frente do conteúdo, a rodada <b>para</b>,
+             porque a base é de outra semana. Em branco, nada é conferido.</p>
         </div>
       </div>
     </div>
@@ -699,7 +753,40 @@ PAGINA_HTML = r"""<!doctype html>
 
   <!-- ------------------------------------------------------------------ -->
   <div class="card full" style="margin-top:16px">
-    <h2>Reprocessamento retroativo · seção 12</h2>
+    <h2>Histórico de recompras · a trava</h2>
+    <p class="hint" style="margin:0 0 14px">
+      Lê as rodadas já emitidas na pasta do OneDrive e monta o
+      <code>historico_recompras.json</code>. Três coisas dependem dele: a <b>numeração</b> da
+      rodada, a <b>trava contra recomprar o mesmo título duas vezes</b> e a checagem de
+      <b>janela já usada</b> — que é a que impede uma rodada de correr sobre um período já
+      recomprado. <b>Só lê</b>: nada é escrito, movido ou renomeado no OneDrive.
+    </p>
+    <div class="switch" style="border-top:0">
+      <div>
+        <div>Sobrescrever um histórico que já tenha rodadas</div>
+        <p class="hint" style="margin:2px 0 0">Deixe desligado. O histórico é a trava contra
+           cobrança em duplicidade; sobrescrever por acidente a desarma.</p>
+      </div>
+      <label class="toggle"><input type="checkbox" id="sobrescrever_historico"><span class="track"><span class="thumb"></span></span></label>
+    </div>
+    <button class="go secundario" id="btnSemear" style="width:auto;min-width:280px">
+      ▶  Popular o histórico pelas rodadas anteriores
+    </button>
+    <div class="nota" id="notaSemear"></div>
+    <div class="tabela-rolo" id="rolaSemear" style="display:none;margin-top:14px">
+      <table id="tabelaSemear">
+        <thead><tr>
+          <th>Rodada</th><th>Pasta</th><th>Recompra</th><th>Janela</th>
+          <th>Linhas no Termo</th><th>Títulos travados</th><th>Valor</th><th>Situação</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ------------------------------------------------------------------ -->
+  <div class="card full" style="margin-top:16px">
+    <h2>Reprocessamento retroativo</h2>
     <p class="hint" style="margin:0 0 14px">
       Roda o motor corrigido sobre as rodadas já emitidas, na pasta do OneDrive, e compara
       com o Termo que de fato saiu. Quantifica o passivo: títulos que deveriam ter entrado e
@@ -751,21 +838,44 @@ PAGINA_HTML = r"""<!doctype html>
   const $ = id => document.getElementById(id);
   const logEl = $("log"), dot = $("dot"), status = $("status");
   const btnConciliar = $("btnConciliar"), btnGerar = $("btnGerar"), btnExcecoes = $("btnExcecoes");
-  const btnRetroativo = $("btnRetroativo");
+  const btnRetroativo = $("btnRetroativo"), btnSemear = $("btnSemear");
   let fonteVortx = "arquivo", fonteGrafeno = "arquivo";
   let token = null, ocupado = false, bloqueado = true, emitido = false;
 
   const moeda = v => Number(v).toLocaleString("pt-BR", {style:"currency", currency:"BRL"});
 
+  //  O resumo da última rodada fica ao lado dos campos de janela: é a
+  //  conferência visual que teria mostrado, antes de rodar, que a janela
+  //  16/07–31/07 já havia sido consumida.
+  function mostrarUltimaRodada(u){
+    const caixa = $("notaUltimaRodada");
+    if(!u){
+      caixa.className = "nota aviso";
+      caixa.textContent = "Nenhuma rodada no histórico — sem referência de janela anterior. "
+        + "Use 'Popular o histórico' no fim da página.";
+      return;
+    }
+    caixa.className = "nota ok";
+    caixa.textContent = "Última rodada registrada: nº " + (u.numero || "—")
+      + " · janela " + u.janela + " · recomprada em " + u.data_recompra
+      + " · " + (u.qtd_titulos || 0) + " títulos · " + moeda(u.valor_total)
+      + (u.titulos_travados ? "" : "  ⚠ sem trava título a título nesta rodada");
+  }
+
   // ---- estado inicial ------------------------------------------------------
   fetch("/inicial").then(r => r.json()).then(d => {
     $("numero_rodada").value = d.numero_rodada;
+    if(d.exige_numero){
+      $("numero_rodada").placeholder = "obrigatório";
+      $("numero_rodada").style.borderColor = "#a86a00";
+    }
     $("data_recompra").value = d.data_recompra;
     $("janela_inicio").value = d.janela_inicio;
     $("janela_fim").value = d.janela_fim;
     $("data_extracao_grafeno").value = d.data_recompra;
     $("pasta_saida").value = d.pasta_saida;
     $("pasta_onedrive").value = d.pasta_onedrive;
+    mostrarUltimaRodada(d.ultima_rodada);
     if(!d.onedrive_existe){
       $("notaRetroativo").className = "nota aviso";
       $("notaRetroativo").textContent =
@@ -784,19 +894,21 @@ PAGINA_HTML = r"""<!doctype html>
       $("segGrafeno").querySelector('[data-fonte="api"]').title =
         "Sem token da API no .env — a conta ainda não foi liberada (pendência 14.2-3).";
     }
-    addLine("Pronto. Rodada " + d.numero_rodada + " sugerida a partir do histórico ("
-            + d.rodadas_no_historico + " rodada(s), " + d.titulos_no_historico
-            + " títulos já recomprados).", "info");
+    addLine("Pronto. Histórico com " + d.rodadas_no_historico + " rodada(s) e "
+            + d.titulos_no_historico + " títulos travados."
+            + (d.exige_numero ? "  ⚠ Informe o número desta rodada à mão."
+                              : "  Rodada " + d.numero_rodada + " sugerida."), "info");
     if(!d.template_existe) addLine("⚠️  Template ausente em templates/ — a conciliação não roda sem ele.", "erro");
   });
 
-  // ---- janela quinzenal segue a data da recompra ---------------------------
+  // ---- a janela segue a data da recompra e o histórico ---------------------
   $("data_recompra").addEventListener("change", async () => {
     const d = $("data_recompra").value;
     if(!d) return;
     const j = await (await fetch("/janela?data=" + d)).json();
-    $("janela_inicio").value = j.inicio;
-    $("janela_fim").value = j.fim;
+    if(j.inicio) $("janela_inicio").value = j.inicio;
+    if(j.fim) $("janela_fim").value = j.fim;
+    mostrarUltimaRodada(j.ultima_rodada);
   });
 
   // ---- seletores de fonte --------------------------------------------------
@@ -825,7 +937,11 @@ PAGINA_HTML = r"""<!doctype html>
       status.textContent = "Abrindo seletor…";
       try{
         const tipo = b.dataset.tipo || "arquivo";
-        const j = await (await fetch("/procurar?tipo=" + tipo)).json();
+        //  Manda o valor atual para o seletor abrir na pasta dele; em branco,
+        //  ele abre na pasta das rodadas do OneDrive.
+        const atual = ($(b.dataset.alvo).value || "").trim();
+        const j = await (await fetch("/procurar?tipo=" + tipo
+                                     + "&atual=" + encodeURIComponent(atual))).json();
         if(j.path) $(b.dataset.alvo).value = j.path;
         status.textContent = j.path ? "Selecionado." : "Nada escolhido.";
       }catch(err){ status.textContent = "Não foi possível abrir o seletor: " + err; }
@@ -880,12 +996,12 @@ PAGINA_HTML = r"""<!doctype html>
   function ocupar(mensagem){
     ocupado = true;
     btnConciliar.disabled = btnGerar.disabled = btnExcecoes.disabled = true;
-    btnRetroativo.disabled = true;
+    btnRetroativo.disabled = btnSemear.disabled = true;
     dot.className = "dot busy"; status.textContent = mensagem;
   }
   function liberar(classe, mensagem, podeGerar){
     ocupado = false;
-    btnConciliar.disabled = btnRetroativo.disabled = false;
+    btnConciliar.disabled = btnRetroativo.disabled = btnSemear.disabled = false;
     btnGerar.disabled = !podeGerar;
     btnExcecoes.disabled = !token;
     dot.className = "dot " + classe; status.textContent = mensagem;
@@ -1020,6 +1136,65 @@ PAGINA_HTML = r"""<!doctype html>
     };
   });
 
+  // ---- semente do histórico ------------------------------------------------
+  btnSemear.addEventListener("click", () => {
+    if(ocupado) return;
+    logEl.innerHTML = "";
+    $("notaSemear").className = "nota"; $("notaSemear").textContent = "";
+    ocupar("Lendo as rodadas anteriores…");
+    const p = new URLSearchParams({
+      pasta_onedrive: $("pasta_onedrive").value,
+      sobrescrever: $("sobrescrever_historico").checked ? "1" : "0",
+    });
+    const es = new EventSource("/semear-historico?" + p);
+    es.onmessage = ev => { const m = JSON.parse(ev.data); addLine(m.msg, m.nivel); };
+    es.addEventListener("fim", ev => {
+      es.close();
+      const r = JSON.parse(ev.data);
+      const corpo = $("tabelaSemear").querySelector("tbody");
+      corpo.innerHTML = "";
+      r.detalhe.forEach(d => {
+        const tr = document.createElement("tr");
+        [d.numero, d.pasta, d.data_recompra, d.janela].forEach(v => {
+          const td = document.createElement("td"); td.textContent = v || "—"; tr.appendChild(td);
+        });
+        [d.linhas || "—", d.titulos || "—", d.valor ? moeda(d.valor) : "—"].forEach(v => {
+          const td = document.createElement("td"); td.className = "n";
+          td.textContent = v; tr.appendChild(td);
+        });
+        const td = document.createElement("td"); td.textContent = d.situacao || "—";
+        tr.appendChild(td);
+        corpo.appendChild(tr);
+      });
+      $("rolaSemear").style.display = "block";
+
+      const ns = $("notaSemear");
+      ns.className = "nota " + (r.conflitos.length || !r.numeracao_confiavel ? "aviso" : "ok");
+      ns.textContent = r.rodadas + " rodadas registradas · " + r.titulos_travados
+        + " títulos travados contra recompra repetida"
+        + (r.conflitos.length ? " · ⚠ " + r.conflitos.length
+            + " rodada(s) com numeração conflitante entre pasta, nome do arquivo e "
+            + "aba INFORMAÇÕES — confira contra o Termo assinado" : "")
+        + (r.sem_travas.length ? " · ⚠ " + r.sem_travas.length
+            + " rodada(s) antiga(s) sem trava título a título" : "")
+        + ". Recarregue a página para a janela e a numeração já saírem do histórico.";
+      mostrarUltimaRodada(r.ultima);
+      liberar("on", "Histórico populado.", !bloqueado && !emitido);
+    });
+    es.addEventListener("erro", ev => {
+      es.close();
+      const e = JSON.parse(ev.data);
+      addLine("❌  " + e.msg, "erro");
+      $("notaSemear").className = "nota erro";
+      $("notaSemear").textContent = e.msg;
+      liberar("err", "Erro.", !bloqueado && !emitido);
+    });
+    es.onerror = () => {
+      if(ocupado){ es.close(); addLine("❌  Conexão com o servidor perdida.", "erro");
+                   liberar("err", "Conexão interrompida.", !bloqueado && !emitido); }
+    };
+  });
+
   // ---- reprocessamento retroativo -----------------------------------------
   btnRetroativo.addEventListener("click", () => {
     if(ocupado) return;
@@ -1126,7 +1301,25 @@ class ClienteDesconectado(Exception):
     """A aba do navegador foi fechada no meio da execução."""
 
 
-def escolher_arquivo():
+def _pasta_inicial(atual=""):
+    """
+    Onde o seletor abre.
+
+    A pasta das rodadas do OneDrive, e não onde o Windows parou da última vez.
+    Escolher a base da pasta errada custou duas rodadas: `13.Recompra_10_08_2026`
+    em vez de `14.Recompra_17_08_2026` traz uma base de 08/08 e o Termo sai com
+    958 títulos em vez de 2.638. Abrindo na pasta certa, as opções ficam à vista
+    e ordenadas por número.
+    """
+    if atual:
+        pai = Path(atual).parent if Path(atual).suffix else Path(atual)
+        if pai.exists():
+            return str(pai)
+    return str(config.PASTA_ONEDRIVE if config.PASTA_ONEDRIVE.exists()
+               else config.PASTA_SAIDAS)
+
+
+def escolher_arquivo(atual=""):
     """Seletor de arquivo nativo (tkinter). Devolve o caminho ou ''."""
     try:
         import tkinter as tk
@@ -1136,6 +1329,7 @@ def escolher_arquivo():
         raiz.attributes("-topmost", True)
         caminho = filedialog.askopenfilename(
             title="Selecione o arquivo de dados",
+            initialdir=_pasta_inicial(atual),
             filetypes=[("Planilhas e CSV", "*.xlsx *.xlsm *.csv"),
                        ("Planilhas Excel", "*.xlsx *.xlsm"),
                        ("CSV", "*.csv"),
@@ -1147,7 +1341,7 @@ def escolher_arquivo():
         return ""
 
 
-def escolher_pasta():
+def escolher_pasta(atual=""):
     """Seletor de pasta nativo (tkinter). Devolve o caminho ou ''."""
     try:
         import tkinter as tk
@@ -1155,7 +1349,8 @@ def escolher_pasta():
         raiz = tk.Tk()
         raiz.withdraw()
         raiz.attributes("-topmost", True)
-        caminho = filedialog.askdirectory(title="Selecione a pasta de destino")
+        caminho = filedialog.askdirectory(title="Selecione a pasta de destino",
+                                          initialdir=_pasta_inicial(atual))
         raiz.destroy()
         return caminho or ""
     except Exception as erro:                                # noqa: BLE001
@@ -1215,7 +1410,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(sugerir_janela(q.get("data", [""])[0]))
             if rota == "/procurar":
                 tipo = q.get("tipo", ["arquivo"])[0]
-                caminho = escolher_pasta() if tipo == "pasta" else escolher_arquivo()
+                atual = q.get("atual", [""])[0]
+                caminho = (escolher_pasta(atual) if tipo == "pasta"
+                           else escolher_arquivo(atual))
                 return self._json({"path": caminho})
             if rota == "/testar-vortx":
                 return self._json(testar_vortx())
@@ -1229,6 +1426,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._rota_excecoes(q)
             if rota == "/retroativo":
                 return self._rota_retroativo(q)
+            if rota == "/semear-historico":
+                return self._rota_semear(q)
             if rota == "/baixar":
                 return self._rota_baixar(q)
             if rota == "/abrir-pasta":
@@ -1322,6 +1521,30 @@ class Handler(BaseHTTPRequestHandler):
                                     None))
             sessao.registrar_arquivo("retroativo", resumo["caminho"])
             resumo["token"] = sessao.token
+            _sse(self, "fim", resumo)
+        except ClienteDesconectado:
+            pass
+        except Exception as erro:                            # noqa: BLE001
+            registrar(f"Falhou: {erro}", "erro")
+            _sse(self, "erro", {"msg": str(erro)})
+        finally:
+            leitura.fechar_cache()
+            _TRAVA.release()
+
+    def _rota_semear(self, q):
+        self._abrir_sse()
+        if not _TRAVA.acquire(blocking=False):
+            return _sse(self, "erro", {"msg": "Já há uma execução em andamento. "
+                                              "Espere ela terminar."})
+        registrar = Registrador(
+            lambda msg, nivel="info": _sse(self, None, {"msg": msg, "nivel": nivel}),
+            etapa="SEMENTE DO HISTÓRICO")
+        try:
+            resumo = semear_historico({
+                "pasta_onedrive": (q.get("pasta_onedrive", [""])[0].strip()
+                                   or str(config.PASTA_ONEDRIVE)),
+                "sobrescrever": q.get("sobrescrever", ["0"])[0] == "1",
+            }, registrar)
             _sse(self, "fim", resumo)
         except ClienteDesconectado:
             pass

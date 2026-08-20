@@ -131,12 +131,13 @@ def _bloqueantes(r):
                "R$ 9.789,13 cobrados em duplicidade."))
 
     # 5. Defasagem zero -----------------------------------------------------
-    dias = r.defasagem_dias
+    origem = getattr(r, "grafeno_origem_data", "") or "—"
     detalhe = (
-        f"Vórtx {nz.br(r.data_extracao_vortx)} · Grafeno "
-        f"{nz.br(r.data_extracao_grafeno)} · recompra "
+        f"Vórtx {nz.br(r.data_extracao_vortx)} (DataGeracao) · Grafeno "
+        f"{nz.br(r.data_extracao_grafeno)} ({origem}) · recompra "
         f"{nz.br(r.parametros.data_recompra)}."
     )
+    dias = r.defasagem_dias
     if getattr(r, "defasagem_problema", None):
         itens.append(Validacao(
             "defasagem_zero", "Defasagem zero", nivel_erro(),
@@ -155,11 +156,35 @@ def _bloqueantes(r):
             f"{calculo.frase_defasagem(dias)} {detalhe}",
             porque="Na 12ª a extração foi de sexta 07/08 e a recompra na segunda "
                    "10/08 — um dia útil. Nesse intervalo 20 sacados pagaram o "
-                   "próprio boleto: R$ 25.409,69 a devolver. Extraia no dia.",
+                   "próprio boleto: R$ 25.409,69 a devolver. Extraia no dia. "
+                   "A data da Grafeno vem do conteúdo da base, não da data de "
+                   "modificação do arquivo.",
             dados=calculo.custo_defasagem(dias)))
+
+    # 5-B. A base da Grafeno é a que se pensa que é? -------------------------
+    itens.append(_frescor_grafeno(r))
 
     # 6. Convergência Python <-> Excel --------------------------------------
     itens.append(_convergencia(r, nivel_erro()))
+
+    # 6-B. O Termo tem título? ----------------------------------------------
+    #  Bloqueia **inclusive em simulação**: foi para pegar exatamente a rodada
+    #  de 14/08, que rodou em simulação, saiu com zero títulos e passou verde.
+    quantidade = len(r.linhas_termo)
+    itens.append(Validacao(
+        "termo_nao_vazio", "Termo com títulos",
+        "OK" if quantidade else "ERRO",
+        f"{quantidade} títulos no Termo." if quantidade else
+        "O Termo saiu com ZERO títulos. Uma rodada de recompra sem nenhum "
+        "título é sinal de parâmetro errado, não de carteira limpa: confira a "
+        "janela, a data de recompra e o frescor das duas bases.",
+        porque="Em 14/08 a rodada saiu com zero títulos porque a janela "
+               "16/07–31/07 já havia sido consumida pela rodada anterior, e "
+               "todas as validações mostraram OK. Zero é sempre suspeito.",
+        dados={"quantidade": quantidade}))
+
+    # 6-C. A janela não pode invadir uma rodada já emitida -------------------
+    itens.append(_sobreposicao_janela(r, nivel_erro()))
 
     # 7. Soma confere -------------------------------------------------------
     soma = calculo.somar(l["valor_recompra"] for l in r.linhas_termo)
@@ -173,15 +198,35 @@ def _bloqueantes(r):
         porque="O nome do arquivo da 12ª dizia 0,59MM enquanto o Termo somava "
                "R$ 0,99 MM."))
 
-    # 8. Janela quinzenal ---------------------------------------------------
+    # 8. Janela coerente ----------------------------------------------------
+    #  Coerência, não calendário. A regra quinzenal estrita que estava aqui
+    #  reprovava as janelas que as rodadas reais de fato usaram — 01/07–31/07 na
+    #  13ª e 01/08–14/08 na 14ª — e aprovava a 16/07–31/07 que zerou o Termo.
+    #  O que importa é a janela não estar em branco, não estar invertida e não
+    #  alcançar dia posterior à própria recompra.
     inicio, fim = r.parametros.janela_inicio, r.parametros.janela_fim
-    valida = calculo.janela_valida(inicio, fim)
+    problemas = calculo.problemas_da_janela(inicio, fim, r.parametros.data_recompra)
+    dias_longos = calculo.janela_longa(inicio, fim)
+    if problemas:
+        #  Bloqueio duro, sem cair para aviso em simulação: janela em branco,
+        #  invertida ou que alcança dia posterior à recompra não é escolha de
+        #  política, é entrada sem sentido. Um fim depois da data de recompra
+        #  significa incluir título que ainda não venceu — não existe rodada,
+        #  real ou simulada, em que isso esteja certo.
+        nivel, detalhe = "ERRO", (f"{nz.br(inicio)} a {nz.br(fim)} — "
+                                  + "; ".join(problemas))
+    elif dias_longos:
+        nivel, detalhe = "AVISO", (f"{nz.br(inicio)} a {nz.br(fim)} — "
+                                   f"{dias_longos} dias, acima do usual "
+                                   f"(as rodadas reais ficaram entre 14 e 31)")
+    else:
+        dias = (fim - inicio).days + 1
+        nivel, detalhe = "OK", f"{nz.br(inicio)} a {nz.br(fim)} — {dias} dias."
     itens.append(Validacao(
-        "janela_quinzenal", "Janela quinzenal",
-        "OK" if valida else nivel_erro(),
-        f"{nz.br(inicio)} a {nz.br(fim)}" + ("" if valida else
-        "  ← fora do padrão dia 1–15 ou 16–fim do mês"),
-        porque="Decisão 1.4: janela quinzenal estrita."))
+        "janela_coerente", "Janela coerente", nivel, detalhe,
+        porque="A janela vem do histórico, não de regra de calendário: começa no "
+               "dia seguinte ao fim da rodada anterior e termina poucos dias "
+               "antes da recompra (seção 8.5, corrigida)."))
 
     # 9. Parâmetros preenchidos ---------------------------------------------
     faltando = []
@@ -256,6 +301,9 @@ def _avisos(r):
                "de boleto — para a conferência entre pessoas não divergir "
                "(seção 2.6: '7 linhas' eram 5 títulos)."))
 
+    # Boleto baixado com irmão aberto ---------------------------------------
+    itens.append(_baixado_com_irmao_aberto(r))
+
     # Resíduo de rodadas anteriores -----------------------------------------
     residuo = r.residuo
     soma_residuo = calculo.somar(x.titulo.valor_nominal for x in residuo)
@@ -270,30 +318,40 @@ def _avisos(r):
         dados={"quantidade": len(residuo), "valor": str(soma_residuo)}))
 
     # Continuidade da janela -------------------------------------------------
-    anterior_inicio, anterior_fim = r.historico.janela_anterior()
-    if anterior_fim is None:
+    #  A sobreposição tem validação própria e bloqueante. Aqui sobra a lacuna,
+    #  que é o outro lado do mesmo cuidado: deixa título para trás.
+    _anterior_inicio, anterior_fim = r.historico.janela_anterior()
+    esperado_inicio = calculo.inicio_seguinte(anterior_fim)
+    if esperado_inicio is None:
         itens.append(Validacao(
             "continuidade", "Continuidade da janela", "OK",
-            "Primeira rodada no histórico — nada a comparar.",
-            porque="A continuidade só existe a partir da segunda rodada."))
+            "Nenhuma rodada no histórico — nada a comparar. "
+            "Popule o histórico pelo botão da tela antes da próxima rodada.",
+            porque="Sem histórico não há continuidade a conferir, nem trava "
+                   "contra recompra repetida, nem numeração automática."))
+    elif r.parametros.janela_inicio == esperado_inicio:
+        itens.append(Validacao(
+            "continuidade", "Continuidade da janela", "OK",
+            f"Emenda com a rodada anterior, que terminou em "
+            f"{nz.br(anterior_fim)}.",
+            porque="Lacuna deixa título para trás; sobreposição cobra duas vezes."))
+    elif r.parametros.janela_inicio and r.parametros.janela_inicio > esperado_inicio:
+        dias = (r.parametros.janela_inicio - esperado_inicio).days
+        itens.append(Validacao(
+            "continuidade", "Continuidade da janela", "AVISO",
+            f"Há lacuna de {dias} dia(s): a rodada anterior terminou em "
+            f"{nz.br(anterior_fim)} e esta começa em "
+            f"{nz.br(r.parametros.janela_inicio)} "
+            f"(esperado {nz.br(esperado_inicio)}).",
+            porque="Vencimento que cai na lacuna não entra em rodada nenhuma — "
+                   "é assim que se forma o passivo da 11ª."))
     else:
-        esperado_inicio, _ = calculo.janela_seguinte(anterior_fim)
-        if r.parametros.janela_inicio == esperado_inicio:
-            itens.append(Validacao(
-                "continuidade", "Continuidade da janela", "OK",
-                f"Emenda com a rodada anterior, que terminou em "
-                f"{nz.br(anterior_fim)}.",
-                porque="Lacuna deixa título para trás; sobreposição cobra duas vezes."))
-        else:
-            relacao = ("lacuna" if r.parametros.janela_inicio > esperado_inicio
-                       else "sobreposição")
-            itens.append(Validacao(
-                "continuidade", "Continuidade da janela", "AVISO",
-                f"Há {relacao}: a rodada anterior terminou em "
-                f"{nz.br(anterior_fim)} e esta começa em "
-                f"{nz.br(r.parametros.janela_inicio)} "
-                f"(esperado {nz.br(esperado_inicio)}).",
-                porque="Lacuna deixa título para trás; sobreposição cobra duas vezes."))
+        itens.append(Validacao(
+            "continuidade", "Continuidade da janela", "AVISO",
+            f"Esta janela começa em {nz.br(r.parametros.janela_inicio)}, antes "
+            f"do esperado {nz.br(esperado_inicio)} — ver a validação de "
+            f"sobreposição de janela.",
+            porque="Lacuna deixa título para trás; sobreposição cobra duas vezes."))
 
     # Boletos Grafeno sem título Vórtx ---------------------------------------
     sem_titulo = c.boletos_sem_titulo
@@ -324,6 +382,216 @@ def _avisos(r):
 
 
 # ---------------------------------------------------------------------------
+#  Título fora do Termo por boleto baixado, tendo irmão em aberto
+# ---------------------------------------------------------------------------
+def _baixado_com_irmao_aberto(r):
+    """
+    Títulos que ficaram fora do Termo porque o boleto deles não está vencido em
+    aberto — mas o mesmo sacado tem, **no mesmo vencimento**, outro boleto que
+    está.
+
+    Foi assim que se achou a única diferença entre o motor e a 14ª feita à mão.
+    OLGA ALVES RODRIGUES tem dois títulos vencendo em 11/08 e três boletos:
+
+        título 165960004  R$ 1.472,26  ->  boleto 403382493610  Baixada
+        título 165964956  R$ 1.608,78  ->  boleto 403382604773  Aberta (Vencida)
+                                           boleto 403382117589  Baixada (sem título)
+
+    O casamento é 1:1 e confirmado duas vezes — chave composta e ligação pelo
+    ``Nosso_Número`` apontam o mesmo boleto para cada título. O de R$ 1.472,26
+    foi **baixado**: aquela cobrança foi cancelada e reemitida como a de
+    R$ 1.608,78, que é a que está vencida em aberto e entra no Termo.
+
+    O Termo manual trouxe os dois, e cobrou R$ 1.505,13 a mais por uma dívida
+    que já estava sendo cobrada na linha do irmão.
+
+    A distinção que a validação faz, e que é a que importa: se o boleto aberto
+    do irmão **já está sendo recomprado** por outro título, não há nada a fazer —
+    a dívida está sendo cobrada uma vez, corretamente. Se **não estiver**, aí sim
+    alguém precisa olhar: pode ser dívida viva que ficou sem título no Termo.
+    """
+    inicio, fim = r.parametros.janela_inicio, r.parametros.janela_fim
+    if not (inicio and fim):
+        return Validacao(
+            "baixado_com_irmao", "Baixado com irmão em aberto", "OK",
+            "Sem janela definida — nada a comparar.",
+            porque="A comparação só faz sentido dentro da janela da rodada.")
+
+    abertos = {}
+    for boleto in r.grafeno.registros:
+        if boleto.status == config.STATUS_RECOMPRAVEL:
+            abertos.setdefault((boleto.documento, boleto.vencimento), []).append(boleto)
+
+    #  Quais boletos já estão sendo recomprados nesta rodada.
+    no_termo = {l["id_titulo"] for l in r.linhas_termo}
+    em_cobranca = {id(c.boleto) for c in r.conciliacao.casamentos
+                   if c.casou and c.titulo.id_titulo in no_termo}
+
+    cobertos, descobertos = [], []
+    for casamento in r.conciliacao.casamentos:
+        titulo = casamento.titulo
+        if not casamento.casou or casamento.status == config.STATUS_RECOMPRAVEL:
+            continue
+        if not (titulo.vencimento and inicio <= titulo.vencimento <= fim):
+            continue
+        irmaos = abertos.get((titulo.documento, titulo.vencimento))
+        if not irmaos:
+            continue
+        if all(id(b) in em_cobranca for b in irmaos):
+            cobertos.append(casamento)
+        else:
+            descobertos.append(casamento)
+
+    if not cobertos and not descobertos:
+        return Validacao(
+            "baixado_com_irmao", "Baixado com irmão em aberto", "OK",
+            "Nenhum título fora do Termo tem irmão vencido em aberto no mesmo "
+            "vencimento.",
+            porque="É o padrão da cobrança reemitida: o boleto antigo é baixado e "
+                   "o novo vira o vencido em aberto. Cobrar os dois é cobrar duas "
+                   "vezes a mesma dívida.")
+
+    soma_cobertos = calculo.somar(c.titulo.valor_nominal for c in cobertos)
+    soma_descobertos = calculo.somar(c.titulo.valor_nominal for c in descobertos)
+    partes = []
+    if cobertos:
+        partes.append(
+            f"{len(cobertos)} título(s), R$ {calculo.arredondar(soma_cobertos)}, "
+            f"cuja dívida **já está** no Termo pela linha do irmão — não cobrar "
+            f"de novo (ex.: {cobertos[0].titulo.id_titulo} "
+            f"{(cobertos[0].titulo.nome or '')[:28]})")
+    if descobertos:
+        partes.append(
+            f"{len(descobertos)} título(s), R$ {calculo.arredondar(soma_descobertos)}, "
+            f"cujo irmão vencido em aberto **não** está sendo recomprado por "
+            f"ninguém — conferir com Operações")
+    return Validacao(
+        "baixado_com_irmao", "Baixado com irmão em aberto",
+        "AVISO" if descobertos else "OK",
+        "; ".join(partes) + ".",
+        porque="A única diferença entre o motor e a 14ª feita à mão foi um caso "
+               "destes: OLGA ALVES RODRIGUES, dois títulos vencendo em 11/08, o "
+               "de R$ 1.472,26 com boleto baixado e o de R$ 1.608,78 vencido em "
+               "aberto. O Termo manual trouxe os dois e cobrou R$ 1.505,13 a mais.",
+        dados={"cobertos": [c.titulo.id_titulo for c in cobertos[:50]],
+               "descobertos": [c.titulo.id_titulo for c in descobertos[:50]]})
+
+
+# ---------------------------------------------------------------------------
+#  Frescor da base da Grafeno
+# ---------------------------------------------------------------------------
+def _frescor_grafeno(r):
+    """
+    A base da Grafeno é a que se pensa que é?
+
+    Duas perguntas em uma. A primeira: **até quando o conteúdo vai**, medido por
+    ``MAX(Data_Criação)`` e ``MAX(Data_Pagamento)`` — nenhum boleto pode ter
+    sido criado ou pago depois de a base ser extraída, então a maior das duas é
+    o piso da data de extração. A segunda: **a tela informou outra coisa?**
+
+    O bloqueio aqui é duro, e não cai para aviso em simulação, porque não é
+    política — é contradição no dado de entrada. Em 14/08 a tela informou
+    extração de 14/08 sobre uma base cujo conteúdo ia até 08/08. O relatório de
+    exceções registrou "Extração Grafeno: 14/08/2026" e a defasagem saiu como um
+    dia útil. Era de seis, e faltavam na base os vencidos de 09 a 14/08: 1.225
+    boletos ``Aberta (Vencida)`` na janela contra os 2.326 do Termo manual.
+    """
+    conteudo = getattr(r, "grafeno_data_conteudo", None)
+    informada = getattr(r, "grafeno_data_informada", None)
+    marcos = r.grafeno.marcos_conteudo if r.grafeno else {}
+    recompra = r.parametros.data_recompra
+    medida = " · ".join(f"MAX({c})={nz.br(d)}" for c, d in sorted(marcos.items()))
+
+    if not conteudo:
+        return Validacao(
+            "grafeno_frescor", "Frescor da base Grafeno", "AVISO",
+            "Não consegui deduzir do conteúdo até quando a base vai — nem "
+            "Data_Criação nem Data_Pagamento vieram preenchidas."
+            + (f" A tela informou {nz.br(informada)}, e essa data não tem como "
+               f"ser conferida." if informada else ""),
+            porque="A data de modificação do arquivo não serve: o arquivo de "
+                   "14/08 estava gravado naquele dia e o conteúdo era de 08/08.")
+
+    #  A comparação é em dias úteis, com tolerância: numa extração de sábado o
+    #  último pagamento é de sexta, e isso não é base velha. O que é base velha
+    #  é o caso de 14/08 — conteúdo de 08/08, cinco dias úteis atrás.
+    if informada and informada > conteudo:
+        uteis = calculo.dias_uteis(conteudo, informada)
+        if uteis > config.TOLERANCIA_FRESCOR_DIAS_UTEIS:
+            return Validacao(
+                "grafeno_frescor", "Frescor da base Grafeno", "ERRO",
+                f"A tela informou extração em {nz.br(informada)}, mas o conteúdo "
+                f"da base vai só até {nz.br(conteudo)} — {uteis} dias úteis de "
+                f"diferença ({medida}). Esta base é de outra semana: exporte a "
+                f"Grafeno de novo antes de rodar.",
+                porque="Foi este o defeito de 14/08. A base tinha as mesmas "
+                       "147.949 linhas da rodada anterior e trazia 1.225 boletos "
+                       "vencidos na janela, contra os 2.326 do Termo feito à mão.",
+                dados={"informada": nz.iso(informada), "conteudo": nz.iso(conteudo),
+                       "dias_uteis": uteis})
+
+    if recompra and conteudo < recompra:
+        atraso = (recompra - conteudo).days
+        return Validacao(
+            "grafeno_frescor", "Frescor da base Grafeno", "AVISO",
+            f"O conteúdo da base vai até {nz.br(conteudo)} ({medida}) e a "
+            f"recompra é em {nz.br(recompra)} — {atraso} dia(s) corridos. "
+            f"Boletos que vencerem nesse intervalo ainda não constam como "
+            f"vencidos. A defasagem em dias úteis está na validação própria.",
+            porque="É estimativa por baixo, e de propósito: nunca faz a base "
+                   "parecer mais nova do que é.",
+            dados={"conteudo": nz.iso(conteudo), "atraso_dias": atraso})
+
+    return Validacao(
+        "grafeno_frescor", "Frescor da base Grafeno", "OK",
+        f"Conteúdo da base vai até {nz.br(conteudo)} ({medida})"
+        + (f", coerente com a extração informada." if informada else "."),
+        porque="Medido no conteúdo, não na data do arquivo — que em 14/08 fez "
+               "uma base de 08/08 passar por base do dia.")
+
+
+# ---------------------------------------------------------------------------
+#  Sobreposição de janela com rodada já emitida
+# ---------------------------------------------------------------------------
+def _sobreposicao_janela(r, nivel_erro):
+    """
+    A janela proposta invade o período de alguma rodada já registrada?
+
+    Esta é a validação que teria impedido a rodada de 14/08 de rodar. A janela
+    16/07–31/07 já havia sido consumida pela rodada de 10/08 (que usou
+    01/07–31/07): os títulos daquele período já tinham saído da carteira da
+    Vórtx, e o motor não tinha o que encontrar. O Termo vazio estava certo para
+    a entrada recebida — a entrada é que estava errada.
+    """
+    sobrepostas = getattr(r, "sobreposicoes_janela", None) or []
+    inicio, fim = r.parametros.janela_inicio, r.parametros.janela_fim
+    if not r.historico.rodadas:
+        return Validacao(
+            "janela_sem_sobreposicao", "Janela não repetida", "AVISO",
+            "Histórico vazio — não há como conferir se esta janela já foi "
+            "recomprada. Popule o histórico antes de emitir.",
+            porque="Sem histórico esta trava não existe, e foi a falta dela que "
+                   "deixou a janela 16/07–31/07 rodar de novo em 14/08.")
+    if not sobrepostas:
+        return Validacao(
+            "janela_sem_sobreposicao", "Janela não repetida", "OK",
+            f"{nz.br(inicio)} a {nz.br(fim)} não invade nenhuma das "
+            f"{len(r.historico.rodadas)} rodadas registradas.",
+            porque="Janela repetida cobra de novo um período já recomprado — ou, "
+                   "quando os títulos já saíram da carteira, produz Termo vazio.")
+    descricoes = "; ".join(r.historico.descricao(x) for x in sobrepostas[:4])
+    return Validacao(
+        "janela_sem_sobreposicao", "Janela não repetida", nivel_erro,
+        f"A janela {nz.br(inicio)} a {nz.br(fim)} invade "
+        f"{len(sobrepostas)} rodada(s) já registrada(s): {descricoes}"
+        + ("…" if len(sobrepostas) > 4 else "") + ".",
+        porque="Foi este o erro de 14/08: a janela 16/07–31/07 já havia sido "
+               "consumida pela rodada de 10/08, os títulos já tinham saído da "
+               "carteira e o Termo saiu vazio.",
+        dados={"rodadas": [x.get("numero") for x in sobrepostas]})
+
+
+# ---------------------------------------------------------------------------
 #  Convergência entre os dois caminhos de cálculo
 # ---------------------------------------------------------------------------
 def _convergencia(r, nivel_erro):
@@ -350,10 +618,26 @@ def _convergencia(r, nivel_erro):
     so_na_planilha = da_planilha - do_motor
     so_no_motor = do_motor - da_planilha
 
+    #  Zero de um lado e zero do outro não é convergência: é ausência de
+    #  comparação. Em 14/08 esta validação disse "OK — os dois caminhos
+    #  convergem: 0 títulos" enquanto o lado Excel dava zero porque as fórmulas
+    #  FILTER nem estavam no arquivo. Um OK que não verifica nada é pior que um
+    #  aviso, porque compra confiança sem entregar nada.
+    if not do_motor and not da_planilha:
+        return Validacao(
+            "convergencia", "Convergência Python ↔ Excel", "AVISO",
+            "Nada a comparar: os dois caminhos deram zero título. Isso não é "
+            "convergência — é a comparação não ter acontecido. Ver a validação "
+            "'Termo com títulos'.",
+            porque="Em 14/08 este item saiu OK com 0 × 0 enquanto a fórmula "
+                   "FILTER não existia mais no arquivo gerado. Zero de cada lado "
+                   "não prova que os dois caminhos concordam.")
+
     if not so_na_planilha and not so_no_motor:
         return Validacao(
             "convergencia", "Convergência Python ↔ Excel", "OK",
-            f"Os dois caminhos convergem: {len(do_motor)} títulos.",
+            f"Os dois caminhos convergem: {len(do_motor)} títulos "
+            f"(Python {len(do_motor)} × fórmula {len(da_planilha)}).",
             porque="São dois caminhos de cálculo independentes que devem dar o "
                    "mesmo Termo; divergência bloqueia (seção 5.3).")
 

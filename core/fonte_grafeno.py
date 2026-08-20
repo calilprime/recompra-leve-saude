@@ -127,9 +127,43 @@ def _montar(tabela, origem, caminho, log=None):
             + ", ".join(f"{s!r} ({n})" for s, n in sorted(status_desconhecidos.items()))
         )
 
+    #  ------------------------------------------------------------------
+    #  Até quando a base vai, deduzido do conteúdo.
+    #
+    #  O export da Grafeno não traz a data da extração em coluna nenhuma, e a
+    #  data de modificação do arquivo mente: o arquivo lido em 14/08 estava
+    #  gravado naquele dia e o conteúdo ia só até 08/08. A defasagem saiu como
+    #  "1 dia útil" quando era de seis, e a rodada passou.
+    #
+    #  ``Data_Criação`` é quando o boleto foi emitido e ``Data_Pagamento``
+    #  quando foi pago; nenhuma das duas pode ser posterior à extração, então a
+    #  maior das duas é o piso da data de extração. É estimativa por baixo, e é
+    #  rotulada assim em toda parte — mas é uma estimativa que não mente na
+    #  direção perigosa: nunca faz a base parecer mais nova do que é.
+    marcos = {}
+    maior_criacao = max((b.data_criacao for b in registros if b.data_criacao),
+                        default=None)
+    maior_pagamento = max((b.data_pagamento for b in registros if b.data_pagamento),
+                          default=None)
+    if maior_criacao:
+        marcos["Data_Criação"] = maior_criacao
+    if maior_pagamento:
+        marcos["Data_Pagamento"] = maior_pagamento
+    data_conteudo = max(marcos.values()) if marcos else None
+
     log(f"    {len(registros)} boletos normalizados.")
+    if data_conteudo:
+        log(f"    Conteúdo da base vai até {nz.br(data_conteudo)} "
+            + " · ".join(f"MAX({c})={nz.br(d)}" for c, d in sorted(marcos.items()))
+            + ".")
+    else:
+        avisos.append(
+            "Não há Data_Criação nem Data_Pagamento preenchidas na base da "
+            "Grafeno — sem elas não dá para saber de que dia é a extração."
+        )
     return ResultadoFonte(registros, tabela, origem, caminho,
-                          datas_geracao=None, avisos=avisos)
+                          datas_geracao=None, avisos=avisos,
+                          data_conteudo=data_conteudo, marcos_conteudo=marcos)
 
 
 # ---------------------------------------------------------------------------

@@ -153,6 +153,30 @@ def _aba_resumo(livro, r):
     _linha(aba, ["Boletos sem título na Vórtx", c.get("boletos_sem_titulo"),
                  "Informativo — a Vórtx é a fonte de verdade do escopo (seção 3.2)"])
 
+    #  A medição que sustenta a decisão de não promover a ligação
+    #  "403"+NumeroTitulo a chave primária. Vai no relatório de cada rodada para
+    #  que a decisão seja reconferida no dado do dia, e não fique valendo por uma
+    #  medição antiga.
+    d = r.conciliacao.diagnostico_ligacao or {}
+    if d.get("pares"):
+        secao(f'Diagnóstico da ligação "{config.PREFIXO_NOSSO_NUMERO}"'
+              f"+NumeroTitulo")
+        _linha(aba, ["Pares que a ligação formaria", d["pares"],
+                     "Se ela fosse usada como chave de casamento"])
+        _linha(aba, ["…deles com boleto de OUTRO sacado", d["outro_sacado"],
+                     f"{d['outro_sacado'] / d['pares'] * 100:.2f}% — a numeração "
+                     f"é sequencial e densa dos dois lados, então a ligação cai "
+                     f"no boleto do vizinho quando o título não tem boleto"])
+        _linha(aba, ["Títulos que só a ligação encontraria", d["so_ela"],
+                     "Os que a chave composta (documento+vencimento+valor) não casa"])
+        _linha(aba, ["…desses, com boleto de OUTRO sacado",
+                     d["so_ela_outro_sacado"],
+                     (f"{d['so_ela_outro_sacado'] / d['so_ela'] * 100:.2f}% — é "
+                      f"por isso que a ligação serve só de desempate entre "
+                      f"boletos que a chave composta já validou, e nunca cria "
+                      f"par novo" if d["so_ela"] else
+                      "nenhum título dependeria só da ligação nesta base")])
+
     secao("Termo")
     _linha(aba, ["Títulos elegíveis", len(r.linhas_termo), ""])
     _linha(aba, ["Valor nominal", calculo.arredondar(r.total_nominal), ""])

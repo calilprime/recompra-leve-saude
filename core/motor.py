@@ -18,7 +18,6 @@ Essa separação é intencional — é o momento de aprovação de exceções pr
 decisão 2.2, e impede que um Termo saia antes de alguém olhar o painel.
 """
 
-from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -48,6 +47,13 @@ class Resultado:
         self.defasagem_problema = None
         self.data_extracao_vortx = None
         self.data_extracao_grafeno = None
+        #  De onde saiu a data da extração da Grafeno e o que o conteúdo diz.
+        #  Quando as duas discordam, quem manda é o conteúdo — e a divergência
+        #  bloqueia, porque foi ela que deixou a base de 08/08 passar por 14/08.
+        self.grafeno_data_informada = None
+        self.grafeno_data_conteudo = None
+        self.grafeno_origem_data = ""
+        self.sobreposicoes_janela = []
         self.pasta_snapshot = None
         self.template = None
         self.convergencia = None
@@ -115,16 +121,33 @@ def conciliar(cfg, log=None):
     resultado.template = template
     log(f"Template: {template.name}")
 
-    parametros = calculo.ler_parametros(template, log=log)
-    parametros = _aplicar_cfg(parametros, cfg, log=log)
-    resultado.parametros = parametros
-
     hist = historico_mod.Historico(cfg.get("historico"))
     resultado.historico = hist
-    ja_recomprados = hist.ids_recomprados
-    if ja_recomprados:
+
+    parametros = calculo.ler_parametros(template, log=log)
+    parametros = _aplicar_cfg(parametros, cfg, hist, log=log)
+    resultado.parametros = parametros
+
+    #  A trava olha o que as **outras** rodadas cobraram. A própria rodada sai
+    #  de cena: reemitir a 14ª corrigida não pode ver os títulos da 14ª como já
+    #  recomprados, senão o Termo vai a zero e ela fica impossível de refazer.
+    ja_recomprados = hist.ids_recomprados_exceto(parametros.numero_rodada)
+    if hist.rodadas:
+        propria = len(hist.ids_recomprados) - len(ja_recomprados)
         log(f"  Histórico: {len(hist.rodadas)} rodadas, "
-            f"{len(ja_recomprados)} títulos já recomprados.")
+            f"{len(ja_recomprados)} títulos travados por rodadas anteriores."
+            + (f" A rodada {parametros.numero_rodada} já está no histórico com "
+               f"{propria} títulos — reemissão, então eles não travam."
+               if propria else ""))
+
+    #  A sobreposição é apurada aqui, antes de qualquer leitura de base: é a
+    #  pergunta mais barata da rodada e a que teria evitado a de 14/08.
+    resultado.sobreposicoes_janela = hist.sobreposicoes(
+        parametros.janela_inicio, parametros.janela_fim,
+        ignorar_numero=parametros.numero_rodada)
+    for rodada in resultado.sobreposicoes_janela:
+        log(f"  ⚠ A janela proposta invade a de {hist.descricao(rodada)} — "
+            f"aqueles títulos já saíram da carteira.", "aviso")
 
     # -- extração ----------------------------------------------------------
     log("")
@@ -174,7 +197,7 @@ def conciliar(cfg, log=None):
     return resultado
 
 
-def _aplicar_cfg(parametros, cfg, log=None):
+def _aplicar_cfg(parametros, cfg, historico=None, log=None):
     """Parâmetros da tela vencem os do template; juros e multa, nunca."""
     log = log or (lambda *a, **k: None)
     if cfg.get("numero_rodada"):
@@ -186,11 +209,21 @@ def _aplicar_cfg(parametros, cfg, log=None):
     if cfg.get("janela_fim"):
         parametros.janela_fim = nz.data(cfg["janela_fim"])
 
-    if parametros.data_recompra and not (parametros.janela_inicio and parametros.janela_fim):
-        parametros.janela_inicio, parametros.janela_fim = \
-            calculo.sugerir_janela(parametros.data_recompra)
-        log(f"  Janela sugerida pela regra quinzenal: "
-            f"{nz.br(parametros.janela_inicio)} a {nz.br(parametros.janela_fim)}.")
+    #  Completar o que faltou — pelo histórico, nunca por regra de calendário.
+    #  A regra quinzenal que ficava aqui produziu 16/07–31/07 para a recompra de
+    #  14/08, uma janela já consumida, e o Termo saiu vazio.
+    if not (parametros.janela_inicio and parametros.janela_fim):
+        _, fim_anterior = (historico.janela_anterior() if historico
+                           else (None, None))
+        inicio, fim = calculo.sugerir_janela(parametros.data_recompra, fim_anterior)
+        if not parametros.janela_inicio and inicio:
+            parametros.janela_inicio = inicio
+            log(f"  Início da janela pelo histórico: {nz.br(inicio)} — dia "
+                f"seguinte ao fim da última rodada ({nz.br(fim_anterior)}).")
+        if not parametros.janela_fim and fim:
+            parametros.janela_fim = fim
+            log(f"  Fim da janela sugerido: {nz.br(fim)} — "
+                f"{config.DIAS_FOLGA_JANELA} dias antes da recompra.")
 
     log(f"  Rodada {parametros.numero_rodada} · recompra em "
         f"{nz.br(parametros.data_recompra)} · janela "
@@ -222,23 +255,56 @@ def _extrair_grafeno(cfg, log=None):
 
 def _data_extracao_grafeno(cfg, resultado, log=None):
     """
-    A data da extração da Grafeno.
+    A data da extração da Grafeno, **deduzida do conteúdo**.
 
-    O export não traz essa data em coluna nenhuma. A interface pede ao operador;
-    na falta, vale a data de modificação do arquivo, e o log diz qual foi usada.
+    O export não traz essa data em coluna nenhuma, e as duas fontes que o código
+    usava antes — a data informada na tela e a data de modificação do arquivo —
+    são as duas capazes de mentir. Foi exatamente o que aconteceu em 14/08: a
+    tela informou 14/08, o arquivo estava gravado em 14/08, e o conteúdo ia até
+    08/08. A validação de defasagem reportou um dia útil e a defasagem real era
+    de seis, então a base não tinha os vencidos de 09 a 14/08 — 1.225 boletos
+    em vez dos 2.326 do Termo manual.
+
+    A regra agora: **vale o conteúdo**. ``MAX(Data_Criação)`` e
+    ``MAX(Data_Pagamento)``, a maior das duas, são o piso da data de extração —
+    nenhum boleto pode ter sido criado ou pago depois de a base ser tirada.
+    A data informada na tela fica registrada para comparação e a divergência
+    vira validação, não é resolvida em silêncio.
     """
     log = log or (lambda *a, **k: None)
     informada = nz.data(cfg.get("data_extracao_grafeno"))
+    conteudo = resultado.grafeno.data_conteudo
+    resultado.grafeno_data_informada = informada
+    resultado.grafeno_data_conteudo = conteudo
+
+    marcos = resultado.grafeno.marcos_conteudo
+    detalhe = (" · ".join(f"MAX({c})={nz.br(d)}" for c, d in sorted(marcos.items()))
+               if marcos else "sem Data_Criação nem Data_Pagamento na base")
+
+    if conteudo:
+        resultado.grafeno_origem_data = "conteúdo"
+        if informada and informada != conteudo:
+            relacao = "posterior" if informada > conteudo else "anterior"
+            log(f"  Extração Grafeno: {nz.br(conteudo)} (deduzida do conteúdo — "
+                f"{detalhe}). A tela informou {nz.br(informada)}, "
+                f"{relacao} ao conteúdo; vale o conteúdo.", "aviso")
+        else:
+            log(f"  Extração Grafeno: {nz.br(conteudo)} (deduzida do conteúdo — "
+                f"{detalhe}).")
+        return conteudo
+
+    #  Sem conteúdo datável não há estimativa possível. A data informada passa a
+    #  valer, mas dita como o que é: palavra do operador, não medição.
     if informada:
-        log(f"  Extração Grafeno: {nz.br(informada)} (informada na tela).")
+        resultado.grafeno_origem_data = "informada"
+        log(f"  Extração Grafeno: {nz.br(informada)} (informada na tela — a base "
+            f"não tem data em coluna nenhuma para conferir).", "aviso")
         return informada
-    caminho = resultado.grafeno.caminho
-    if caminho and Path(caminho).exists():
-        data_arquivo = datetime.fromtimestamp(Path(caminho).stat().st_mtime).date()
-        log(f"  Extração Grafeno: {nz.br(data_arquivo)} "
-            f"(data de modificação do arquivo — confirme na tela).", "aviso")
-        return data_arquivo
-    return date.today()
+
+    resultado.grafeno_origem_data = "desconhecida"
+    log("  Extração Grafeno: desconhecida — a base não traz Data_Criação nem "
+        "Data_Pagamento e nada foi informado na tela.", "aviso")
+    return None
 
 
 def _defasagem(resultado, log=None):
@@ -267,6 +333,10 @@ def _defasagem(resultado, log=None):
         )
         log(f"  {resultado.defasagem_problema}", "aviso")
         return 0
+
+    #  A Vórtx tem data explícita e a Grafeno agora tem data deduzida do
+    #  conteúdo: as duas entram na conta, e a pior manda. Antes a Grafeno
+    #  entrava com a data de modificação do arquivo, que sempre parecia de hoje.
 
     posteriores = [rotulo for rotulo, valor in
                    (("Vórtx", resultado.data_extracao_vortx),

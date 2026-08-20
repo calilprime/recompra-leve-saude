@@ -48,10 +48,11 @@ class ResultadoFonte:
     """Dados lidos + a procedência deles, que vai para o snapshot e o log."""
 
     __slots__ = ("registros", "tabela", "origem", "caminho", "datas_geracao",
-                 "linhas_lidas", "avisos")
+                 "linhas_lidas", "avisos", "data_conteudo", "marcos_conteudo")
 
     def __init__(self, registros, tabela, origem, caminho,
-                 datas_geracao=None, avisos=None):
+                 datas_geracao=None, avisos=None, data_conteudo=None,
+                 marcos_conteudo=None):
         self.registros = registros
         self.tabela = tabela
         self.origem = origem
@@ -59,6 +60,12 @@ class ResultadoFonte:
         self.datas_geracao = sorted(datas_geracao or [])
         self.linhas_lidas = len(tabela) if tabela is not None else len(registros)
         self.avisos = avisos or []
+        #  Até quando os dados vão, deduzido do **conteúdo** e não do arquivo.
+        #  A data de modificação mente: o arquivo lido em 14/08 tinha conteúdo
+        #  de 06 a 08/08 e a validação de defasagem reportou 1 dia útil quando a
+        #  defasagem real era de seis.
+        self.data_conteudo = data_conteudo
+        self.marcos_conteudo = marcos_conteudo or {}
 
     @property
     def data_geracao(self):
@@ -162,7 +169,12 @@ def _montar(tabela, origem, caminho, log=None):
 
     log(f"    {len(registros)} títulos normalizados; "
         f"DataGeracao: {', '.join(d.strftime('%d/%m/%Y') for d in sorted(datas)) or '—'}")
-    return ResultadoFonte(registros, tabela, origem, caminho, datas, avisos)
+    #  Do lado da Vórtx o conteúdo tem data explícita: é a própria DataGeracao.
+    return ResultadoFonte(
+        registros, tabela, origem, caminho, datas, avisos,
+        data_conteudo=max(datas) if datas else None,
+        marcos_conteudo={"DataGeracao": max(datas)} if datas else {},
+    )
 
 
 # ---------------------------------------------------------------------------
